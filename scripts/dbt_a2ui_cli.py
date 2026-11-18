@@ -105,7 +105,7 @@ CONNECTOR_RE = re.compile(
 )
 ENDPOINT_RE = re.compile(r"^https://[A-Za-z0-9.-]+(?::\d+)?(?:/[A-Za-z0-9_./~%-]*)?$")
 NUMERIC_ID_RE = re.compile(r"^\d{1,22}$")
-SAFE_UNIQUE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,180}$")
+SAFE_UNIQUE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,260}$")
 SAFE_GRAIN_SET = {"DAY", "WEEK", "MONTH", "QUARTER", "YEAR"}
 EMAIL_PII_RE = re.compile(r"\b([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*@([A-Za-z0-9.-]+\.[A-Za-z]{2,})\b")
 
@@ -459,11 +459,15 @@ def extract_items(obj: Any, preferred_keys: tuple[str, ...] = ()) -> list[dict[s
         "data",
         "items",
         "results",
+        "lineage",
         "projects",
         "models",
         "mart_models",
+        "seeds",
         "sources",
         "exposures",
+        "semantic_models",
+        "semanticModels",
         "macros",
         "metrics",
         "saved_queries",
@@ -634,6 +638,120 @@ def _extract_run_diagnostic(raw_rd: Any, txt_rd: str, raw_err: Any, txt_err: str
     }
 
 
+def _normalize_dbt_resource_type(raw_type: Any, uid: str = "") -> str:
+    """Normalizes CamelCase / snake_case dbt Discovery API resource types into canonical keys."""
+    rt = str(raw_type or "").strip()
+    if not rt and "." in uid:
+        rt = uid.split(".")[0]
+    low = re.sub(r"[\s-]+", "_", rt).lower()
+    mapping = {
+        "model": "model",
+        "mart": "model",
+        "analysis": "model",
+        "seed": "seed",
+        "source": "source",
+        "test": "test",
+        "unittest": "test",
+        "unit_test": "test",
+        "semanticmodel": "semantic_model",
+        "semantic_model": "semantic_model",
+        "metric": "metric",
+        "exposure": "exposure",
+        "snapshot": "snapshot",
+        "savedquery": "saved_query",
+        "saved_query": "saved_query",
+        "macro": "macro",
+    }
+    if low in mapping:
+        return mapping[low]
+    if "." in uid:
+        prefix = uid.split(".")[0].lower()
+        if prefix in mapping:
+            return mapping[prefix]
+    return low or "model"
+
+
+def _node_stub_from_uid(uid: str) -> dict[str, str]:
+    parts = uid.split(".")
+    rtype = _normalize_dbt_resource_type("", uid)
+    if rtype == "source" and len(parts) >= 4:
+        name = f"{parts[-2]}.{parts[-1]}"
+    else:
+        name = parts[-1] if parts else uid
+    return {"unique_id": uid, "name": name, "resource_type": rtype}
+
+
+def _collect_lineage_payload(raw_lin: Any) -> tuple[list[dict[str, Any]], list[tuple[str, str]]]:
+    """Extracts node dicts and explicit edge pairs from varied dbt Discovery / MCP lineage shapes."""
+    nodes_found: list[dict[str, Any]] = []
+    edges_found: list[tuple[str, str]] = []
+
+    def _id_list(val: Any) -> list[str]:
+        if not isinstance(val, list):
+            return []
+        out: list[str] = []
+        for item in val:
+            if isinstance(item, str) and item.strip():
+                out.append(item.strip())
+            elif isinstance(item, dict):
+                cand = str(item.get("uniqueId") or item.get("unique_id") or item.get("id") or "").strip()
+                if cand:
+                    out.append(cand)
+        return out
+
+    def _visit(obj: Any, depth: int = 0) -> None:
+        if depth > 6 or obj is None:
+            return
+        if isinstance(obj, list):
+            for el_item in obj:
+                if isinstance(el_item, dict):
+                    if any(k in el_item for k in ("uniqueId", "unique_id", "resourceType", "resource_type", "parentIds", "parent_ids")):
+                        nodes_found.append(el_item)
+                    elif any(k in el_item for k in ("source", "from", "parent")) and any(k in el_item for k in ("target", "to", "child")):
+                        s = str(el_item.get("source") or el_item.get("from") or el_item.get("parent") or "").strip()
+                        t = str(el_item.get("target") or el_item.get("to") or el_item.get("child") or "").strip()
+                        if s and t:
+                            edges_found.append((s, t))
+                    elif isinstance(el_item.get("node"), dict):
+                        nodes_found.append(el_item["node"])
+            return
+        if isinstance(obj, dict):
+            # Direct node-map shape: {"model.pkg.foo": {"unique_id": ...}, ...}
+            if obj and all(isinstance(v, dict) and "." in str(k) for k, v in list(obj.items())[:5]):
+                for k, v in obj.items():
+                    nd_copy = dict(v)
+                    nd_copy.setdefault("unique_id", str(k))
+                    nodes_found.append(nd_copy)
+                return
+            for list_key in ("lineage", "nodes", "items", "results"):
+                val = obj.get(list_key)
+                if isinstance(val, (list, dict)):
+                    _visit(val, depth + 1)
+            for edge_key in ("edges", "links", "relationships"):
+                ev = obj.get(edge_key)
+                if isinstance(ev, list):
+                    _visit(ev, depth + 1)
+            pmap = obj.get("parent_map") or obj.get("parentMap")
+            if isinstance(pmap, dict):
+                for child_uid, parents in pmap.items():
+                    for p_uid in _id_list(parents):
+                        edges_found.append((p_uid, str(child_uid).strip()))
+            cmap = obj.get("child_map") or obj.get("childMap")
+            if isinstance(cmap, dict):
+                for parent_uid, children in cmap.items():
+                    for c_uid in _id_list(children):
+                        edges_found.append((str(parent_uid).strip(), c_uid))
+            for wrap_key in ("data", "environment", "applied", "definition", "graph"):
+                wv = obj.get(wrap_key)
+                if isinstance(wv, (dict, list)):
+                    _visit(wv, depth + 1)
+
+    _visit(raw_lin, 0)
+    if not nodes_found:
+        nodes_found = extract_items(raw_lin, ("lineage", "nodes", "items", "data"))
+    return nodes_found, edges_found
+
+
 def _parse_lineage_and_node(
     lin_uid: str,
     raw_lin: Any,
@@ -645,59 +763,203 @@ def _parse_lineage_and_node(
     *,
     include_perf: bool = False,
 ) -> dict[str, Any]:
-    nodes_raw = extract_items(raw_lin, ("nodes", "items", "data"))
-    edges_raw = extract_items(raw_lin, ("edges", "links", "relationships"))
+    nodes_raw, explicit_edges = _collect_lineage_payload(raw_lin)
 
     node_map: dict[str, dict[str, Any]] = {}
+    raw_edge_pairs: list[tuple[str, str]] = list(explicit_edges)
+
+    def _extract_uid_list(val: Any) -> list[str]:
+        if not isinstance(val, list):
+            return []
+        res: list[str] = []
+        for x in val:
+            if isinstance(x, str) and x.strip():
+                res.append(x.strip())
+            elif isinstance(x, dict):
+                u = str(x.get("uniqueId") or x.get("unique_id") or x.get("id") or "").strip()
+                if u:
+                    res.append(u)
+        return res
+
     for n in nodes_raw:
         nid = str(n.get("uniqueId") or n.get("unique_id") or n.get("id") or "").strip()
-        if not nid:
+        if not nid or nid.startswith("macro."):
             continue
-        rtype = str(n.get("resourceType") or n.get("resource_type") or n.get("type") or nid.split(".")[0]).lower()
+        rtype = _normalize_dbt_resource_type(
+            n.get("resourceType") or n.get("resource_type") or n.get("type"), nid
+        )
+        if rtype == "macro":
+            continue
+        raw_name = str(n.get("name") or n.get("label") or "").strip()
+        if rtype == "source":
+            s_grp = str(n.get("sourceName") or n.get("source_name") or "").strip()
+            if s_grp and raw_name and not raw_name.startswith(f"{s_grp}."):
+                disp_name = f"{s_grp}.{raw_name}"
+            else:
+                disp_name = raw_name or _node_stub_from_uid(nid)["name"]
+        else:
+            disp_name = raw_name or _node_stub_from_uid(nid)["name"]
+
         node_map[nid] = {
             "unique_id": nid,
-            "name": str(n.get("name") or nid.split(".")[-1]),
+            "name": disp_name,
             "resource_type": rtype,
         }
 
-    direct_parents: set[str] = set()
-    direct_children: set[str] = set()
-    all_ancestors: set[str] = set()
-    all_descendants: set[str] = set()
-    for edge in edges_raw:
-        src = str(edge.get("source") or edge.get("from") or edge.get("parent") or "")
-        dst = str(edge.get("target") or edge.get("to") or edge.get("child") or "")
-        if dst == lin_uid and src:
-            direct_parents.add(src)
-        elif src == lin_uid and dst:
-            direct_children.add(dst)
-        if src and src != lin_uid:
-            all_ancestors.add(src)
-        if dst and dst != lin_uid:
-            all_descendants.add(dst)
+        dep_on = n.get("dependsOn") or n.get("depends_on")
+        dep_nodes = dep_on.get("nodes") if isinstance(dep_on, dict) else []
+        parent_ids = (
+            _extract_uid_list(n.get("parentIds"))
+            + _extract_uid_list(n.get("parent_ids"))
+            + _extract_uid_list(n.get("parents"))
+            + _extract_uid_list(dep_nodes)
+        )
+        for p_uid in parent_ids:
+            if p_uid and not p_uid.startswith("macro."):
+                raw_edge_pairs.append((p_uid, nid))
+                # Always materialize root seed/source parents even if depth boundary stopped 1 hop shy
+                if p_uid not in node_map and p_uid.startswith(("seed.", "source.")):
+                    node_map[p_uid] = _node_stub_from_uid(p_uid)
 
-    if direct_parents or direct_children:
-        up_ids = list(direct_parents) + [x for x in all_ancestors if x not in direct_parents and x not in direct_children]
-        down_ids = list(direct_children) + [x for x in all_descendants if x not in direct_children and x not in direct_parents]
-    else:
-        up_ids = [nid for nid, info in node_map.items() if nid != lin_uid and info["resource_type"] in ("source", "seed")]
-        down_ids = [nid for nid in node_map if nid != lin_uid and nid not in up_ids]
+        child_ids = (
+            _extract_uid_list(n.get("childrenIds"))
+            + _extract_uid_list(n.get("children_ids"))
+            + _extract_uid_list(n.get("children"))
+        )
+        for c_uid in child_ids:
+            if c_uid and not c_uid.startswith("macro."):
+                raw_edge_pairs.append((nid, c_uid))
+                if c_uid not in node_map and c_uid.startswith(("semantic_model.", "exposure.", "metric.")):
+                    node_map[c_uid] = _node_stub_from_uid(c_uid)
 
-    upstream_nodes = [
-        node_map.get(nid, {"unique_id": nid, "name": nid.split(".")[-1], "resource_type": nid.split(".")[0]})
-        for nid in up_ids[:14]
-    ]
-    downstream_nodes = [
-        node_map.get(nid, {"unique_id": nid, "name": nid.split(".")[-1], "resource_type": nid.split(".")[0]})
-        for nid in down_ids[:14]
-    ]
+    # Materialize any endpoints from explicit top-level `edges` arrays
+    for s_uid, t_uid in explicit_edges:
+        if s_uid and not s_uid.startswith("macro.") and s_uid not in node_map:
+            node_map[s_uid] = _node_stub_from_uid(s_uid)
+        if t_uid and not t_uid.startswith("macro.") and t_uid not in node_map:
+            node_map[t_uid] = _node_stub_from_uid(t_uid)
 
-    guessed_rtype = lin_uid.split(".")[0].lower() if "." in lin_uid else "model"
+    guessed_rtype = _normalize_dbt_resource_type("", lin_uid)
     nd_dict = raw_nd if isinstance(raw_nd, dict) else {}
     if isinstance(nd_dict.get("data"), dict):
         nd_dict = nd_dict["data"]
-    if isinstance(nd_dict.get("model"), dict):
-        nd_dict = nd_dict["model"]
+    for inner_k in ("model", "seed", "source", "exposure", "semanticModel", "semantic_model", "node"):
+        if isinstance(nd_dict.get(inner_k), dict):
+            nd_dict = nd_dict[inner_k]
+            break
+
+    focus_name = str(nd_dict.get("name") or (node_map.get(lin_uid) or {}).get("name") or _node_stub_from_uid(lin_uid)["name"])
+    if lin_uid not in node_map:
+        node_map[lin_uid] = {
+            "unique_id": lin_uid,
+            "name": focus_name,
+            "resource_type": guessed_rtype,
+        }
+    else:
+        node_map[lin_uid]["name"] = focus_name or node_map[lin_uid]["name"]
+
+    # Deduplicate directed edges within the discovered subgraph
+    dedup_edges: list[tuple[str, str]] = []
+    seen_edges: set[tuple[str, str]] = set()
+    connected_nodes: set[str] = set()
+    for u, v in raw_edge_pairs:
+        if u == v or u not in node_map or v not in node_map:
+            continue
+        if (u, v) not in seen_edges:
+            seen_edges.add((u, v))
+            dedup_edges.append((u, v))
+            connected_nodes.add(u)
+            connected_nodes.add(v)
+
+    # Fallback if a minimal/custom server returned flat nodes without parentIds/edges
+    if len(node_map) > 1 and not dedup_edges:
+        for nid, info in node_map.items():
+            if nid == lin_uid:
+                continue
+            pair = (nid, lin_uid) if info["resource_type"] in ("source", "seed") else (lin_uid, nid)
+            seen_edges.add(pair)
+            dedup_edges.append(pair)
+
+    # Prioritize structural dbt resources (seed, source, model, semantic_model, metric, exposure, snapshot)
+    # so large test suites never crowd out models, seeds, or semantic models!
+    direct_focus_neighbors = {
+        v if u == lin_uid else u
+        for (u, v) in dedup_edges
+        if u == lin_uid or v == lin_uid
+    }
+    structural_ids = [
+        nid
+        for nid, info in node_map.items()
+        if nid != lin_uid and info["resource_type"] != "test"
+    ]
+    test_ids = [
+        nid
+        for nid, info in node_map.items()
+        if nid != lin_uid and info["resource_type"] == "test"
+    ]
+
+    def _test_sort_key(tid: str) -> tuple[int, int, str]:
+        tname = node_map[tid]["name"].lower()
+        is_direct = 0 if tid in direct_focus_neighbors else 1
+        is_generic = 1 if tname.startswith(("not_null_", "unique_", "accepted_values_", "relationships_")) else 0
+        return (is_direct, is_generic, tname)
+
+    test_ids.sort(key=_test_sort_key)
+    kept_ids: set[str] = {lin_uid}
+    kept_ids.update(structural_ids[:60])
+    kept_ids.update(test_ids[:24])
+
+    dag_nodes: list[dict[str, Any]] = [node_map[nid] for nid in node_map if nid in kept_ids]
+    dag_edges: list[dict[str, str]] = [
+        {"source": u, "target": v}
+        for (u, v) in dedup_edges
+        if u in kept_ids and v in kept_ids
+    ]
+
+    # Compute true multi-hop ancestors (`upstream`) and descendants (`downstream`) via BFS on dag_edges
+    parents_of: dict[str, list[str]] = {}
+    children_of: dict[str, list[str]] = {}
+    for e in dag_edges:
+        parents_of.setdefault(e["target"], []).append(e["source"])
+        children_of.setdefault(e["source"], []).append(e["target"])
+
+    ancestors: list[str] = []
+    seen_anc: set[str] = {lin_uid}
+    q_up = list(parents_of.get(lin_uid, []))
+    while q_up:
+        cur = q_up.pop(0)
+        if cur in seen_anc:
+            continue
+        seen_anc.add(cur)
+        ancestors.append(cur)
+        for p_id in parents_of.get(cur, []):
+            if p_id not in seen_anc:
+                q_up.append(p_id)
+
+    descendants: list[str] = []
+    seen_desc: set[str] = {lin_uid} | set(ancestors)
+    q_dn = list(children_of.get(lin_uid, []))
+    while q_dn:
+        cur = q_dn.pop(0)
+        if cur in seen_desc:
+            continue
+        seen_desc.add(cur)
+        descendants.append(cur)
+        for c_id in children_of.get(cur, []):
+            if c_id not in seen_desc:
+                q_dn.append(c_id)
+
+    # Any remaining nodes in the bounded graph (e.g., sibling semantic_model/test on an upstream/downstream model)
+    for nd in dag_nodes:
+        nid = nd["unique_id"]
+        if nid != lin_uid and nid not in seen_anc and nid not in seen_desc:
+            if nd["resource_type"] in ("seed", "source"):
+                ancestors.append(nid)
+            else:
+                descendants.append(nid)
+
+    upstream_nodes = [node_map[nid] for nid in ancestors if nid in node_map]
+    downstream_nodes = [node_map[nid] for nid in descendants if nid in node_map]
 
     cols_out: list[dict[str, str]] = []
     raw_cols = nd_dict.get("columns") or nd_dict.get("catalogColumns") or []
@@ -768,6 +1030,8 @@ def _parse_lineage_and_node(
         "columns": cols_out,
         "upstream": upstream_nodes,
         "downstream": downstream_nodes,
+        "dag_nodes": dag_nodes,
+        "dag_edges": dag_edges,
         "health_kv": health_kv,
         "health_text": health_text,
         "performance": perf_runs,
@@ -999,7 +1263,7 @@ def hydrate_workspace_bundle(
         id_arg = {"unique_id": focus_model_uid} if "." in focus_model_uid else {"name": focus_model_uid}
         wave2_specs["focus_lin"] = (
             "get_lineage",
-            {"project_id": project_id, "unique_id": focus_model_uid, "direction": "both", "depth": 2, "limit": 60},
+            {"project_id": project_id, "unique_id": focus_model_uid, "direction": "both", "depth": 5, "limit": 150},
         )
         wave2_specs["focus_nd"] = ("get_node_details", {"project_id": project_id, "resource_type": "model", **id_arg})
         wave2_specs["focus_mh"] = ("get_model_health", {"project_id": project_id, **id_arg})
@@ -1323,21 +1587,23 @@ def deep_dive_model(
     if not target_uid:
         return
 
-    # Resolve bare model name to full unique_id if present in prefetched catalog
+    # Resolve bare resource name to full unique_id if present in prefetched catalog or cached lineage graphs
     if "." not in target_uid:
         all_res = (state.get("models") or []) + (state.get("sources") or []) + (state.get("exposures") or [])
+        for dd_cached in (state.get("model_deep_dives") or {}).values():
+            if isinstance(dd_cached, dict):
+                all_res.extend(dd_cached.get("dag_nodes") or [])
         matched = next((r["unique_id"] for r in all_res if r.get("name") == target_uid and "." in str(r.get("unique_id"))), "")
         if matched:
             target_uid = matched
 
-    guessed_rtype = target_uid.split(".")[0].lower() if "." in target_uid else "model"
-    if guessed_rtype not in ("model", "source", "exposure", "test", "seed", "snapshot", "macro", "semantic_model"):
-        guessed_rtype = "model"
+    guessed_rtype = _normalize_dbt_resource_type("", target_uid)
+    nd_rtype = guessed_rtype if guessed_rtype in ("model", "source", "exposure", "test", "seed", "snapshot", "macro", "semantic_model", "saved_query", "metric") else "model"
 
     id_arg = {"unique_id": target_uid} if "." in target_uid else {"name": target_uid}
     specs: dict[str, tuple[str, dict[str, Any] | None]] = {
-        "lin": ("get_lineage", {"project_id": project_id, "unique_id": target_uid, "direction": "both", "depth": 2, "limit": 60}),
-        "nd": ("get_node_details", {"project_id": project_id, "resource_type": guessed_rtype, **id_arg}),
+        "lin": ("get_lineage", {"project_id": project_id, "unique_id": target_uid, "direction": "both", "depth": 5, "limit": 150}),
+        "nd": ("get_node_details", {"project_id": project_id, "resource_type": nd_rtype, **id_arg}),
     }
     if guessed_rtype == "model":
         specs["mh"] = ("get_model_health", {"project_id": project_id, **id_arg})
@@ -1549,10 +1815,12 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
     }}
     * {{ box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }}
     html, body {{ width: 100%; max-width: 100%; overflow-x: hidden; background: var(--canvas); color: var(--text); font-family: var(--sans); font-size: 13.5px; line-height: 1.48; }}
-    .shell {{ max-width: 860px; margin: 0 auto; padding: 12px 14px 44px; display: flex; flex-direction: column; gap: 12px; }}
+    .shell {{ max-width: 1080px; margin: 0 auto; padding: 12px 14px 44px; display: flex; flex-direction: column; gap: 12px; }}
     .topbar {{ background: var(--header-bg); color: #fff; border-bottom: 2px solid var(--accent); padding: 10px 16px; display: flex; align-items: center; justify-content: space-between; gap: 10px; position: sticky; top: 0; z-index: 30; }}
-    .brand-row {{ display: flex; align-items: center; gap: 9px; min-width: 0; }}
-    .brand-title {{ font-weight: 800; font-size: 13.5px; letter-spacing: 0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+    .brand-row {{ display: flex; align-items: center; gap: 10px; min-width: 0; }}
+    .brand-divider {{ width: 1px; height: 16px; background: rgba(255,255,255,0.22); flex-shrink: 0; }}
+    .brand-title {{ font-weight: 700; font-size: 13px; color: rgba(255,255,255,0.92); letter-spacing: 0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+    .dbt-official-logo {{ display: block; flex-shrink: 0; }}
     .proj-select {{ background: rgba(255,255,255,0.12); color: #fff; border: 1px solid rgba(255,255,255,0.25); border-radius: 8px; padding: 4px 8px; font-size: 12px; font-weight: 600; max-width: 185px; width: auto; }}
     .proj-select option {{ color: #0f172a; background: #fff; }}
     .back-nav-btn {{ padding: 5px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.28); background: rgba(255,255,255,0.12); color: #fff; font-family: inherit; font-size: 12px; font-weight: 700; cursor: pointer; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; }}
@@ -1596,13 +1864,31 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
     .queue-list {{ display: flex; flex-direction: column; gap: 8px; }}
     .queue-item {{ border: 1px solid var(--border); border-radius: 11px; padding: 11px 13px; display: flex; align-items: center; justify-content: space-between; gap: 10px; background: #fff; cursor: pointer; transition: border-color 0.12s; }}
     .queue-item:hover, .queue-item.selected {{ border-color: var(--accent); background: #FFFBFA; }}
-    .lineage-grid {{ background-color: #F8FAFC; background-image: radial-gradient(#CBD5E1 1.1px, transparent 1.1px); background-size: 15px 15px; border: 1px solid var(--border); border-radius: 12px; padding: 14px; }}
-    .lin-flow-lr {{ display: flex; flex-direction: row; align-items: stretch; justify-content: space-between; gap: 10px; overflow-x: auto; }}
-    .lin-flow-td {{ display: flex; flex-direction: column; align-items: stretch; gap: 8px; }}
-    .lin-col {{ flex: 1; min-width: 170px; display: flex; flex-direction: column; gap: 7px; }}
-    .lin-node {{ background: #fff; border: 1px solid #CBD5E1; border-radius: 9px; padding: 8px 10px; cursor: pointer; }}
-    .lin-node:hover {{ border-color: var(--accent); }}
-    .lin-node.focus {{ border: 2px solid var(--primary); background: #FFF5F2; cursor: default; }}
+    .dbt-dag-viewport {{ position: relative; background-color: #FAFAFB; background-image: radial-gradient(#CBD5E1 1px, transparent 1px); background-size: 14px 14px; border: 1px solid #E2E8F0; border-radius: 10px; overflow: auto; max-height: 560px; min-height: 290px; cursor: grab; user-select: none; }}
+    .dbt-dag-viewport.panning {{ cursor: grabbing; }}
+    .dbt-dag-zoom-wrap {{ position: relative; display: inline-block; min-width: 100%; }}
+    .dbt-dag-stage {{ position: relative; display: inline-flex; padding: 28px 32px; transform-origin: 0 0; }}
+    .dbt-dag-svg {{ position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; z-index: 1; }}
+    .dbt-dag-columns-lr {{ position: relative; z-index: 2; display: inline-flex; flex-direction: row; align-items: center; gap: 76px; }}
+    .dbt-dag-columns-td {{ position: relative; z-index: 2; display: inline-flex; flex-direction: column; align-items: center; gap: 54px; }}
+    .dbt-dag-col-lr {{ display: flex; flex-direction: column; justify-content: center; align-items: flex-start; gap: 15px; }}
+    .dbt-dag-col-td {{ display: flex; flex-direction: row; justify-content: center; align-items: center; flex-wrap: wrap; gap: 15px; }}
+    .dbt-dag-node {{ position: relative; background: #FFFFFF; border: 1px solid #94A3B8; border-radius: 6px; padding: 9px 14px 9px 9px; min-width: 156px; max-width: 272px; display: flex; align-items: center; gap: 10px; cursor: pointer; box-shadow: 0 1px 2px rgba(15,23,42,0.04); transition: border-color 0.14s ease, box-shadow 0.14s ease, opacity 0.14s ease; }}
+    .dbt-dag-node:hover {{ border-color: #334155; box-shadow: 0 3px 10px rgba(15,23,42,0.10); }}
+    .dbt-dag-node.focus {{ border: 1.8px solid #1E293B; box-shadow: 0 4px 14px rgba(15,23,42,0.14); cursor: default; }}
+    .dbt-dag-node.hl-active {{ border-color: #1E293B; box-shadow: 0 3px 10px rgba(15,23,42,0.12); }}
+    .dbt-dag-node.hl-dim {{ opacity: 0.34; }}
+    .dbt-res-badge {{ width: 32px; height: 32px; min-width: 32px; border-radius: 5px; display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; flex-shrink: 0; }}
+    .dbt-res-badge svg {{ display: block; flex-shrink: 0; }}
+    .dbt-res-code {{ font-size: 8.5px; font-weight: 800; letter-spacing: 0.03em; line-height: 1; font-family: var(--sans); }}
+    .dbt-node-label {{ font-family: var(--sans); font-size: 12.5px; font-weight: 500; color: #1E293B; line-height: 1.3; word-break: break-word; text-align: left; }}
+    .dbt-dag-node.focus .dbt-node-label {{ font-weight: 600; color: #0F172A; }}
+    .dbt-type-filter-chip {{ border: 1px solid #CBD5E1; background: #FFFFFF; color: #1E293B; border-radius: 6px; padding: 4px 9px; font-size: 11.5px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-family: inherit; }}
+    .dbt-type-filter-chip.off {{ opacity: 0.48; background: #F1F5F9; color: #64748B; }}
+    .dbt-type-dot {{ width: 10px; height: 10px; border-radius: 3px; display: inline-block; flex-shrink: 0; border: 1px solid rgba(15,23,42,0.12); }}
+    .dbt-zoom-group {{ display: inline-flex; align-items: center; border: 1px solid #CBD5E1; border-radius: 7px; overflow: hidden; background: #fff; }}
+    .dbt-zoom-btn {{ border: none; background: transparent; color: #334155; padding: 4px 8px; font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit; min-height: 28px; }}
+    .dbt-zoom-btn:hover {{ background: #F1F5F9; }}
     .bar-row {{ display: flex; align-items: center; gap: 8px; font-size: 12px; }}
     .bar-track {{ flex: 1; height: 9px; background: #E2E8F0; border-radius: 999px; overflow: hidden; }}
     .bar-fill {{ height: 100%; background: var(--accent); border-radius: 999px; }}
@@ -1681,6 +1967,9 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
     let codeMode = "compiled";
     let isMobileInit = (window.innerWidth || 800) < 580;
     let lineageOrient = String(STATE.lineage_orientation || (isMobileInit ? "td" : "lr"));
+    let lineageZoom = 1.0;
+    let lineageHiddenTypes = {{}};
+    let activeLineageRedraw = null;
 
     // Tab 3: Semantic Metrics client-side state
     const mvInit = STATE.metrics_view || {{}};
@@ -1728,17 +2017,147 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
       return node;
     }}
 
+    // Official dbt Logo Vector Paths (traced directly from official dbt mark + wordmark)
+    const DBT_MARK_PATH = "M5.7 0.9L8.1 0.6L15.0 4.0L16.0 5.0L20.0 7.0L21.0 8.0L25.0 10.0L26.0 11.0L30.0 13.0L31.8 14.4L32.4 14.0L32.4 13.2L31.3 10.7L29.7 9.0L30.0 7.7L38.0 2.7L42.2 0.7L44.1 0.6L47.0 2.0L48.4 3.9L49.2 5.6L48.9 8.1L47.0 12.0L46.0 13.0L44.0 17.0L43.0 18.0L41.6 20.9L41.0 23.1L41.0 26.0L41.6 27.8L43.7 32.0L46.2 35.8L49.3 42.2L49.2 43.4L48.3 45.2L45.3 48.1L43.1 48.4L40.9 47.8L40.0 47.0L36.0 45.0L35.0 44.0L29.0 41.0L28.0 40.0L24.0 38.0L23.0 37.0L19.0 35.0L18.6 36.1L18.7 37.0L21.0 40.0L21.1 41.2L8.8 48.3L7.4 48.5L5.1 47.9L3.0 46.0L1.7 44.0L1.6 41.9L5.0 35.1L6.0 34.0L9.0 27.9L10.0 25.0L9.5 22.1L8.7 20.1L1.7 7.8L1.6 6.1L2.2 3.9L4.0 2.0ZM24.0 21.0L21.0 24.0L22.0 26.0L24.0 28.0L25.1 28.6L26.3 28.4L29.3 25.3L29.4 23.9L26.1 20.6L25.1 20.4Z";
+    const DBT_WORD_PATH = "M78.7 6.9L79.8 6.5L83.8 6.5L85.1 6.7L85.4 7.2L85.3 39.1L84.2 39.7L79.2 39.6L78.7 39.1L78.5 37.2L77.9 36.8L74.8 39.4L70.2 40.1L67.8 39.4L66.0 39.1L62.7 36.1L61.8 34.8L60.6 31.8L59.9 28.0L59.9 26.0L60.6 22.8L62.9 18.0L65.9 15.7L67.9 14.7L73.2 14.7L76.0 15.9L77.8 17.7L78.2 17.7L78.6 16.8ZM90.7 6.9L92.2 6.5L95.8 6.5L96.5 6.9L96.9 18.3L99.9 15.7L101.9 14.7L104.8 14.5L108.0 14.9L110.0 15.9L113.1 19.0L114.3 20.9L115.3 24.8L115.4 28.8L114.4 33.2L112.5 36.2L112.0 37.1L109.0 39.1L105.0 40.1L103.0 40.1L100.2 39.2L97.1 36.7L96.8 36.9L96.5 39.2L95.8 39.7L91.2 39.7L90.5 39.2L90.3 8.2ZM123.6 7.9L125.8 7.4L126.4 7.8L126.5 13.8L126.9 14.7L131.0 14.9L131.7 16.2L131.7 19.8L131.1 21.0L127.2 21.1L126.5 22.2L126.6 33.2L127.2 33.6L130.1 33.7L131.1 35.0L131.1 39.0L129.8 39.7L123.8 39.4L121.9 38.4L120.7 37.1L119.9 33.8L119.9 22.2L118.8 21.1L116.9 21.0L116.3 19.8L116.3 16.2L116.8 15.2L117.0 14.9L118.8 14.9L120.1 14.3L120.3 10.2L120.7 8.9ZM70.9 20.8L68.9 21.8L67.6 23.8L66.7 26.2L66.8 29.1L67.6 31.2L69.1 33.0L72.2 33.9L74.2 33.6L75.9 33.0L78.0 30.9L78.5 28.8L78.4 25.2L77.5 23.2L76.2 21.6L73.2 20.5ZM100.9 20.8L99.1 22.0L97.9 23.3L97.2 24.8L96.8 28.2L97.8 31.1L99.1 32.7L101.8 33.8L104.2 33.6L105.2 33.5L107.1 32.2L108.4 30.2L108.6 26.2L108.4 24.2L107.0 22.1L105.8 21.4L103.2 20.5Z";
+
+    function makeDbtLogoSvg(withWordmark, heightPx, wordColor) {{
+      const ns = "http://www.w3.org/2000/svg";
+      const svg = document.createElementNS(ns, "svg");
+      const h = Number(heightPx || 22);
+      const vbW = withWordmark ? 134 : 51;
+      const w = Math.round((h * vbW) / 50);
+      svg.setAttribute("viewBox", "0 0 " + vbW + " 50");
+      svg.setAttribute("width", String(w));
+      svg.setAttribute("height", String(h));
+      svg.setAttribute("class", "dbt-official-logo");
+      svg.setAttribute("aria-label", "dbt");
+      const mark = document.createElementNS(ns, "path");
+      mark.setAttribute("d", DBT_MARK_PATH);
+      mark.setAttribute("fill", "#FF6849");
+      mark.setAttribute("fill-rule", "evenodd");
+      svg.appendChild(mark);
+      if (withWordmark) {{
+        const word = document.createElementNS(ns, "path");
+        word.setAttribute("d", DBT_WORD_PATH);
+        word.setAttribute("fill", wordColor || "#FFFFFF");
+        word.setAttribute("fill-rule", "evenodd");
+        svg.appendChild(word);
+      }}
+      return svg;
+    }}
+
     function makeDbtSvg() {{
+      return makeDbtLogoSvg(true, 22, "#FFFFFF");
+    }}
+
+    // Official dbt Platform Explorer Resource Badge Palette & 3-Letter Codes
+    const DBT_RES_META = {{
+      seed: {{ code: "SED", label: "Seeds", bg: "#BFFEAF", fg: "#14532D", order: 1 }},
+      source: {{ code: "SRC", label: "Sources", bg: "#A7F3D0", fg: "#064E3B", order: 2 }},
+      model: {{ code: "MDL", label: "Models", bg: "#D6EDFF", fg: "#1E3A5F", order: 3 }},
+      snapshot: {{ code: "SNP", label: "Snapshots", bg: "#E2D9FF", fg: "#3730A3", order: 4 }},
+      semantic_model: {{ code: "SEM", label: "Semantic Models", bg: "#FFB5C3", fg: "#4C0519", order: 5 }},
+      metric: {{ code: "MTR", label: "Metrics", bg: "#FFD6E7", fg: "#701A75", order: 6 }},
+      exposure: {{ code: "EXP", label: "Exposures", bg: "#FFE4B5", fg: "#78350F", order: 7 }},
+      saved_query: {{ code: "SVQ", label: "Saved Queries", bg: "#FCE7F3", fg: "#831843", order: 8 }},
+      test: {{ code: "TST", label: "Tests", bg: "#ABFFC1", fg: "#14532D", order: 9 }}
+    }};
+
+    function normalizeResType(rawType, uid) {{
+      const s = String(rawType || "").toLowerCase().replace(/[\\s-]+/g, "_");
+      if (s === "seed") return "seed";
+      if (s === "source") return "source";
+      if (s === "semantic_model" || s === "semanticmodel") return "semantic_model";
+      if (s === "test" || s === "unit_test" || s === "unittest") return "test";
+      if (s === "metric") return "metric";
+      if (s === "exposure") return "exposure";
+      if (s === "snapshot") return "snapshot";
+      if (s === "saved_query" || s === "savedquery") return "saved_query";
+      if (s === "model" || s === "mart" || s === "analysis") return "model";
+      if (uid && String(uid).includes(".")) {{
+        return normalizeResType(String(uid).split(".")[0], "");
+      }}
+      return "model";
+    }}
+
+    function makeDbtResIconSvg(rtype, strokeColor) {{
       const ns = "http://www.w3.org/2000/svg";
       const svg = document.createElementNS(ns, "svg");
       svg.setAttribute("viewBox", "0 0 24 24");
-      svg.setAttribute("width", "18");
-      svg.setAttribute("height", "18");
-      svg.setAttribute("fill", "#FF694B");
-      const p = document.createElementNS(ns, "path");
-      p.setAttribute("d", "M19.4 3L12 10.4 4.6 3 2 5.6l7.4 7.4L2 20.4 4.6 23l7.4-7.4 7.4 7.4 2.6-2.6-7.4-7.4L22 5.6 19.4 3z");
-      svg.appendChild(p);
+      svg.setAttribute("width", "13");
+      svg.setAttribute("height", "13");
+      svg.setAttribute("fill", "none");
+      svg.setAttribute("stroke", strokeColor);
+      svg.setAttribute("stroke-width", "1.9");
+      svg.setAttribute("stroke-linecap", "round");
+      svg.setAttribute("stroke-linejoin", "round");
+      const addPath = d => {{
+        const p = document.createElementNS(ns, "path");
+        p.setAttribute("d", d);
+        svg.appendChild(p);
+      }};
+      const addCircle = (cx, cy, r) => {{
+        const c = document.createElementNS(ns, "circle");
+        c.setAttribute("cx", String(cx));
+        c.setAttribute("cy", String(cy));
+        c.setAttribute("r", String(r));
+        svg.appendChild(c);
+      }};
+      if (rtype === "seed") {{
+        // Sprout / seedling icon matching dbt Platform SED badge
+        addPath("M12 21v-9");
+        addPath("M12 15c-4 0-6.5-2.6-6.5-6.5 3.9 0 6.5 2.5 6.5 6.5z");
+        addPath("M12 13c4 0 6.5-2.6 6.5-6.5-3.9 0-6.5 2.5-6.5 6.5z");
+      }} else if (rtype === "semantic_model") {{
+        // 3-node semantic network icon matching dbt Platform SEM badge
+        addCircle(6.5, 6.5, 2.3);
+        addCircle(17.5, 8.0, 2.3);
+        addCircle(11.0, 17.5, 2.3);
+        addPath("M8.7 7.0l6.5 0.8");
+        addPath("M7.5 8.6l2.6 6.7");
+      }} else if (rtype === "test") {{
+        // Clipboard with checkmark matching dbt Platform TST badge
+        addPath("M9 3.5h6v3H9z");
+        addPath("M9 5H6.5A1.5 1.5 0 0 0 5 6.5v12A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5v-12A1.5 1.5 0 0 0 17.5 5H15");
+        addPath("M9 13.2l2.1 2.1 4.2-4.3");
+      }} else if (rtype === "source") {{
+        // Cylinder database icon matching dbt Platform SRC badge
+        addPath("M5 6.5c0 1.7 3.1 3 7 3s7-1.3 7-3-3.1-3-7-3-7 1.3-7 3z");
+        addPath("M5 6.5v11c0 1.7 3.1 3 7 3s7-1.3 7-3v-11");
+        addPath("M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3");
+      }} else if (rtype === "metric") {{
+        addPath("M4 19h16");
+        addPath("M6 15l4-4 3 3 5-6");
+        addPath("M14.5 8H18v3.5");
+      }} else if (rtype === "exposure") {{
+        addPath("M4 5h16v14H4z");
+        addPath("M4 10h16");
+        addPath("M10 10v9");
+      }} else if (rtype === "snapshot") {{
+        addCircle(12, 12, 8);
+        addPath("M12 7.5V12l3 2");
+      }} else {{
+        // Isometric 3D cube matching dbt Platform MDL badge
+        addPath("M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z");
+        addPath("M12 12l8-4.5");
+        addPath("M12 12v9");
+        addPath("M12 12L4 7.5");
+      }}
       return svg;
+    }}
+
+    function makeDbtResBadge(rawType, uid) {{
+      const rtype = normalizeResType(rawType, uid);
+      const meta = DBT_RES_META[rtype] || DBT_RES_META.model;
+      return el("span", {{
+        className: "dbt-res-badge",
+        style: "background:" + meta.bg + ";color:" + meta.fg + ";",
+        title: meta.label + " (" + meta.code + ")"
+      }}, [
+        makeDbtResIconSvg(rtype, meta.fg),
+        el("span", {{ className: "dbt-res-code", text: meta.code }})
+      ]);
     }}
 
     const ICON_PATHS = {{
@@ -1879,7 +2298,10 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
         syncActivity();
       }}
     }});
-    window.addEventListener("resize", () => {{ if (isSubmitting) syncActivity(); }});
+    window.addEventListener("resize", () => {{
+      if (isSubmitting) syncActivity();
+      if (typeof activeLineageRedraw === "function") activeLineageRedraw();
+    }});
 
     function dispatchAction(actionName, data, label, detail) {{
       isSubmitting = true;
@@ -1973,23 +2395,46 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
       const models = Array.isArray(STATE.models) ? STATE.models : [];
       const sources = Array.isArray(STATE.sources) ? STATE.sources : [];
       const exposures = Array.isArray(STATE.exposures) ? STATE.exposures : [];
-      return [...models, ...sources, ...exposures];
+      const base = [...models, ...sources, ...exposures];
+      const seen = new Set(base.map(r => r.unique_id));
+      const deepDives = STATE.model_deep_dives || {{}};
+      Object.values(deepDives).forEach(dd => {{
+        const dnodes = (dd && Array.isArray(dd.dag_nodes)) ? dd.dag_nodes : [];
+        dnodes.forEach(n => {{
+          if (!n || !n.unique_id || seen.has(n.unique_id)) return;
+          const rt = normalizeResType(n.resource_type, n.unique_id);
+          if (rt === "seed" || rt === "semantic_model") {{
+            seen.add(n.unique_id);
+            base.push({{
+              unique_id: n.unique_id,
+              name: n.name || n.unique_id.split(".").pop(),
+              kind: rt,
+              status_badge: rt === "seed" ? "Seed" : "Semantic Model",
+              status_bucket: "tracked",
+              ref_snippet: rt === "seed" ? ("{{{{ ref('" + (n.name || n.unique_id.split(".").pop()) + "') }}}}") : ""
+            }});
+          }}
+        }});
+      }});
+      return base;
     }}
 
     function renderHeader() {{
       const brandHost = document.getElementById("brandHost");
       const allRes = allUnifiedResources();
-      const leftItems = [];
+      const leftItems = [
+        makeDbtLogoSvg(true, 22, "#FFFFFF"),
+        el("span", {{ className: "brand-divider" }}),
+        el("span", {{ className: "brand-title", text: "Cloud Workbench" }})
+      ];
       if (activeTab === 2 && catalogViewMode === "detail" && allRes.length > 0) {{
         leftItems.push(iconBtn({{
           type: "button",
           className: "back-nav-btn",
+          style: "margin-left:4px;",
           onClick: () => {{ catalogViewMode = "list"; render(); }}
         }}, "arrow-left", "All Resources (" + allRes.length + ")"));
-      }} else {{
-        leftItems.push(makeDbtSvg());
       }}
-      leftItems.push(el("span", {{ className: "brand-title", text: "dbt Cloud Workbench" }}));
       brandHost.replaceChildren(...leftItems);
 
       const projHost = document.getElementById("projHost");
@@ -2028,6 +2473,17 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
       const failedRuns = runs.filter(r => r.status_bucket === "error");
       const activeRuns = runs.filter(r => r.status_bucket === "running");
       const alertSources = sources.filter(s => s.status_bucket === "error" || s.status_bucket === "warn");
+
+      const triggerRefreshRuns = (focusId) => {{
+        const targetId = String(focusId || selectedRunId || "");
+        if (targetId) selectedRunId = targetId;
+        dispatchAction(
+          "dbt_refresh_runs",
+          {{ run_id: targetId, status_filter: runStatusFilter, job_id: runJobFilter, tab: 1, confirmed_in_gui: false }},
+          targetId ? ("Refreshing Run #" + targetId) : "Refreshing Recent Job Runs",
+          "Checking latest run status, step logs & build result from dbt Cloud..."
+        );
+      }};
 
       // 1. Project KPI Summary Strip (1-click 0ms jump/filter)
       container.appendChild(el("div", {{ className: "kpi-grid" }}, [
@@ -2084,7 +2540,10 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
               el("span", {{ className: "pill pill-warn", text: ar.status.toUpperCase() + " - #" + ar.id }}),
               el("span", {{ style: "font-weight:700;margin-left:8px;", text: ar.job_name }})
             ]),
-            iconBtn({{ type: "button", className: "btn btn-sm", onClick: ev => {{ ev.stopPropagation(); openCancelModal(ar); }} }}, "stop", "Cancel Run")
+            el("div", {{ style: "display:flex;gap:6px;align-items:center;flex-wrap:wrap;" }}, [
+              iconBtn({{ type: "button", className: "btn btn-sm btn-primary", onClick: ev => {{ ev.stopPropagation(); triggerRefreshRuns(ar.id); }} }}, "refresh", "Refresh"),
+              iconBtn({{ type: "button", className: "btn btn-sm", onClick: ev => {{ ev.stopPropagation(); openCancelModal(ar); }} }}, "stop", "Cancel Run")
+            ])
           ]));
         }});
 
@@ -2203,7 +2662,8 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
         }});
         countLabel.textContent = "Showing " + listNow.length + " of " + runs.length + " prefetched runs (0ms filter)";
         runListHost.replaceChildren(...(listNow.length ? listNow.slice(0, 14).map(r => {{
-          const hasCachedDiag = Boolean(diags[r.id]);
+          const isRowRunning = r.status_bucket === "running";
+          const hasCachedDiag = Boolean(diags[r.id]) && !isRowRunning;
           return el("div", {{
             className: "queue-item" + (String(r.id) === String(selectedRunId) ? " selected" : ""),
             onClick: () => {{ selectedRunId = String(r.id); render(); }}
@@ -2212,7 +2672,16 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
               el("div", {{ style: "font-weight:700;", text: r.job_name + " · Run #" + r.id }}),
               el("div", {{ style: "font-size:11.5px;color:var(--muted);font-family:var(--mono);", text: (r.created_at || "") + (r.duration ? " · " + r.duration : "") + (r.git_branch ? " · " + r.git_branch : "") }})
             ]),
-            el("div", {{ style: "display:flex;align-items:center;gap:6px;" }}, [
+            el("div", {{ style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;" }}, [
+              isRowRunning ? iconBtn({{
+                type: "button",
+                className: "btn btn-sm btn-primary run-row-refresh-btn",
+                title: "Refresh Run #" + r.id + " status and view result",
+                onClick: ev => {{
+                  ev.stopPropagation();
+                  triggerRefreshRuns(r.id);
+                }}
+              }}, "refresh", "Refresh") : null,
               hasCachedDiag ? el("span", {{ className: "pill pill-neutral", style: "font-size:10.5px;", text: "Logs Ready" }}) : null,
               el("span", {{ className: statusPillClass(r.status), text: r.status.toUpperCase() }})
             ])
@@ -2229,13 +2698,6 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
         cancelled: runs.filter(r => r.status_bucket === "cancelled").length
       }};
 
-      const triggerRefreshRuns = () => dispatchAction(
-        "dbt_refresh_runs",
-        {{ run_id: selectedRunId, status_filter: runStatusFilter, job_id: runJobFilter, tab: 1, confirmed_in_gui: false }},
-        "Refreshing Recent Job Runs",
-        "Fetching latest job run statuses, step logs & results from dbt Cloud..."
-      );
-
       container.appendChild(el("div", {{ className: "card" }}, [
         el("div", {{ className: "row-between" }}, [
           el("div", {{ style: "display:flex;align-items:center;gap:10px;flex-wrap:wrap;" }}, [
@@ -2245,7 +2707,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
               className: "btn btn-sm",
               id: "refreshRunsBtn",
               title: "Refresh recent job runs and view latest run status & logs",
-              onClick: triggerRefreshRuns
+              onClick: () => triggerRefreshRuns(selectedRunId)
             }}, "refresh", "Refresh")
           ]),
           countLabel
@@ -2283,7 +2745,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
               el("div", {{ style: "font-size:12px;color:var(--muted);font-family:var(--mono);", text: (curRun.created_at || "") + (curRun.duration ? " | Duration: " + curRun.duration : "") + ((diag && diag.git_sha) ? " | SHA " + diag.git_sha : "") }})
             ]),
             el("div", {{ style: "display:flex;gap:6px;flex-wrap:wrap;" }}, [
-              isActive ? iconBtn({{ type: "button", className: "btn btn-primary", onClick: triggerRefreshRuns }}, "refresh", "Refresh Status & Result") : null,
+              isActive ? iconBtn({{ type: "button", className: "btn btn-primary", onClick: () => triggerRefreshRuns(curRun.id) }}, "refresh", "Refresh Status & Result") : null,
               isFailed ? iconBtn({{ type: "button", className: "btn btn-primary", onClick: () => openRetryModal(curRun) }}, "retry", "Safe Retry Run", "arrow-right") : null,
               isActive ? iconBtn({{ type: "button", className: "btn", onClick: () => openCancelModal(curRun) }}, "stop", "Cancel Run") : null,
               curRun.job_id ? iconBtn({{ type: "button", className: "btn", onClick: () => openTriggerModal(curRun.job_id, "", "Re-triggered from Run #" + curRun.id) }}, "play", "Re-Trigger Job") : null,
@@ -2320,6 +2782,585 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
     }}
 
     // ==========================================================================
+    // DBT PLATFORM EXPLORER MULTI-RANK DAG LINEAGE RENDERER (DOM + BEZIER SVG)
+    // ==========================================================================
+    function renderDbtPlatformLineage(container, dd, deepDives) {{
+      const isTD = lineageOrient === "td";
+      const focusUid = String(dd.unique_id || focusUniqueId || "");
+
+      // Reconstruct full node + edge set (supporting both multi-hop dag_nodes/dag_edges & legacy upstream/downstream)
+      const rawNodes = (Array.isArray(dd.dag_nodes) && dd.dag_nodes.length > 0)
+        ? dd.dag_nodes
+        : [
+            ...(Array.isArray(dd.upstream) ? dd.upstream : []),
+            {{ unique_id: focusUid, name: dd.name || focusUid.split(".").pop(), resource_type: dd.resource_type || "model" }},
+            ...(Array.isArray(dd.downstream) ? dd.downstream : [])
+          ];
+
+      const nodeById = new Map();
+      rawNodes.forEach(n => {{
+        if (!n || !n.unique_id) return;
+        const uid = String(n.unique_id);
+        nodeById.set(uid, {{
+          unique_id: uid,
+          name: String(n.name || uid.split(".").pop()),
+          resource_type: normalizeResType(n.resource_type, uid)
+        }});
+      }});
+      if (focusUid && !nodeById.has(focusUid)) {{
+        nodeById.set(focusUid, {{
+          unique_id: focusUid,
+          name: String(dd.name || focusUid.split(".").pop()),
+          resource_type: normalizeResType(dd.resource_type, focusUid)
+        }});
+      }}
+
+      let rawEdges = Array.isArray(dd.dag_edges) ? dd.dag_edges : [];
+      if (!rawEdges.length && nodeById.size > 1) {{
+        const synth = [];
+        (Array.isArray(dd.upstream) ? dd.upstream : []).forEach(u => {{
+          if (u && u.unique_id) synth.push({{ source: String(u.unique_id), target: focusUid }});
+        }});
+        (Array.isArray(dd.downstream) ? dd.downstream : []).forEach(v => {{
+          if (v && v.unique_id) synth.push({{ source: focusUid, target: String(v.unique_id) }});
+        }});
+        rawEdges = synth;
+      }}
+
+      // Count resource types across the full graph for dbt Explorer filter chips
+      const typeCounts = {{}};
+      nodeById.forEach(nd => {{
+        typeCounts[nd.resource_type] = (typeCounts[nd.resource_type] || 0) + 1;
+      }});
+      const presentTypes = Object.keys(typeCounts).sort((a, b) =>
+        ((DBT_RES_META[a] && DBT_RES_META[a].order) || 99) - ((DBT_RES_META[b] && DBT_RES_META[b].order) || 99)
+      );
+
+      // Filter visible nodes (focused resource is always kept visible)
+      const visNodes = new Map();
+      nodeById.forEach((nd, uid) => {{
+        if (uid === focusUid || !lineageHiddenTypes[nd.resource_type]) {{
+          visNodes.set(uid, nd);
+        }}
+      }});
+
+      // Build full adjacency first so hiding an intermediate type still preserves transitive edges
+      const fullChildren = new Map();
+      rawEdges.forEach(e => {{
+        const s = String(e.source || "");
+        const t = String(e.target || "");
+        if (!s || !t || s === t || !nodeById.has(s) || !nodeById.has(t)) return;
+        if (!fullChildren.has(s)) fullChildren.set(s, new Set());
+        fullChildren.get(s).add(t);
+      }});
+
+      const visEdgeKeySet = new Set();
+      const visEdges = [];
+      visNodes.forEach((_, srcUid) => {{
+        const queue = Array.from(fullChildren.get(srcUid) || []);
+        const visitedHidden = new Set();
+        while (queue.length > 0) {{
+          const cur = queue.shift();
+          if (cur === srcUid) continue;
+          if (visNodes.has(cur)) {{
+            const ek = srcUid + "->" + cur;
+            if (!visEdgeKeySet.has(ek)) {{
+              visEdgeKeySet.add(ek);
+              visEdges.push({{ source: srcUid, target: cur }});
+            }}
+          }} else if (!visitedHidden.has(cur)) {{
+            visitedHidden.add(cur);
+            (fullChildren.get(cur) || []).forEach(nxt => queue.push(nxt));
+          }}
+        }}
+      }});
+
+      // Cycle-safe topological sort + Sugiyama longest-path layering + backward slack tightening
+      const parentsMap = new Map();
+      const childrenMap = new Map();
+      visNodes.forEach((_, uid) => {{
+        parentsMap.set(uid, []);
+        childrenMap.set(uid, []);
+      }});
+
+      // DFS cycle guard so DAG ranking is 100% deterministic even on malformed cyclical metadata
+      const reachable = (startUid, goalUid) => {{
+        const seen = new Set([startUid]);
+        const stack = [startUid];
+        while (stack.length > 0) {{
+          const cur = stack.pop();
+          if (cur === goalUid) return true;
+          (childrenMap.get(cur) || []).forEach(nx => {{
+            if (!seen.has(nx)) {{ seen.add(nx); stack.push(nx); }}
+          }});
+        }}
+        return false;
+      }};
+
+      const dagEdgesClean = [];
+      visEdges.forEach(e => {{
+        if (!reachable(e.target, e.source)) {{
+          childrenMap.get(e.source).push(e.target);
+          parentsMap.get(e.target).push(e.source);
+          dagEdgesClean.push(e);
+        }}
+      }});
+
+      // Kahn's topological order
+      const inDeg = new Map();
+      visNodes.forEach((_, uid) => inDeg.set(uid, parentsMap.get(uid).length));
+      const topo = [];
+      const ready = [];
+      inDeg.forEach((deg, uid) => {{ if (deg === 0) ready.push(uid); }});
+      ready.sort((a, b) => visNodes.get(a).name.localeCompare(visNodes.get(b).name));
+      while (ready.length > 0) {{
+        const u = ready.shift();
+        topo.push(u);
+        childrenMap.get(u).forEach(v => {{
+          const nd = inDeg.get(v) - 1;
+          inDeg.set(v, nd);
+          if (nd === 0) ready.push(v);
+        }});
+      }}
+      visNodes.forEach((_, uid) => {{ if (!topo.includes(uid)) topo.push(uid); }});
+
+      // Step 1: Forward longest-path rank assignment
+      const rankMap = new Map();
+      topo.forEach(u => {{
+        const ps = parentsMap.get(u);
+        let r = 0;
+        ps.forEach(p => {{
+          const pr = rankMap.has(p) ? rankMap.get(p) : 0;
+          if (pr + 1 > r) r = pr + 1;
+        }});
+        rankMap.set(u, r);
+      }});
+
+      // Step 2: Backward slack tightening (pulls short side-branches like raw_customers -> stg_customers
+      // directly adjacent to their target model instead of stranding them in Column 0)
+      for (let i = topo.length - 1; i >= 0; i--) {{
+        const u = topo[i];
+        if (u === focusUid) continue;
+        const ch = childrenMap.get(u);
+        if (ch && ch.length > 0) {{
+          let minChildRank = Infinity;
+          ch.forEach(v => {{
+            const vr = rankMap.get(v);
+            if (vr < minChildRank) minChildRank = vr;
+          }});
+          if (Number.isFinite(minChildRank) && minChildRank - 1 > rankMap.get(u)) {{
+            rankMap.set(u, minChildRank - 1);
+          }}
+        }}
+      }}
+
+      // Normalize ranks into contiguous column indices 0 .. numCols-1
+      const distinctRanks = Array.from(new Set(Array.from(rankMap.values()))).sort((a, b) => a - b);
+      const rankToCol = new Map();
+      distinctRanks.forEach((rk, idx) => rankToCol.set(rk, idx));
+
+      const columns = distinctRanks.map(() => []);
+      visNodes.forEach((nd, uid) => {{
+        const colIdx = rankToCol.get(rankMap.get(uid)) || 0;
+        columns[colIdx].push(nd);
+      }});
+
+      const baseSort = (a, b) => {{
+        if (a.unique_id === focusUid) return -1;
+        if (b.unique_id === focusUid) return 1;
+        const oa = (DBT_RES_META[a.resource_type] && DBT_RES_META[a.resource_type].order) || 50;
+        const ob = (DBT_RES_META[b.resource_type] && DBT_RES_META[b.resource_type].order) || 50;
+        if (oa !== ob) return oa - ob;
+        return a.name.localeCompare(b.name);
+      }};
+      columns.forEach(col => col.sort(baseSort));
+
+      // Barycenter crossing minimization (aligns 1:1 seed -> stg_model -> mart -> SEM/TST rows cleanly!)
+      const rowPos = new Map();
+      const refreshRowPos = () => {{
+        columns.forEach(col => col.forEach((nd, idx) => rowPos.set(nd.unique_id, idx)));
+      }};
+      refreshRowPos();
+      for (let pass = 0; pass < 2; pass++) {{
+        // Forward sweep (align children with parents)
+        for (let c = 1; c < columns.length; c++) {{
+          columns[c].sort((a, b) => {{
+            const pa = parentsMap.get(a.unique_id) || [];
+            const pb = parentsMap.get(b.unique_id) || [];
+            const ba = pa.length ? pa.reduce((s, u) => s + (rowPos.get(u) ?? 0), 0) / pa.length : (rowPos.get(a.unique_id) ?? 0);
+            const bb = pb.length ? pb.reduce((s, u) => s + (rowPos.get(u) ?? 0), 0) / pb.length : (rowPos.get(b.unique_id) ?? 0);
+            if (Math.abs(ba - bb) > 0.01) return ba - bb;
+            return baseSort(a, b);
+          }});
+          refreshRowPos();
+        }}
+        // Backward sweep (align seeds/sources directly inline with their staging models)
+        for (let c = columns.length - 2; c >= 0; c--) {{
+          columns[c].sort((a, b) => {{
+            const ca = childrenMap.get(a.unique_id) || [];
+            const cb = childrenMap.get(b.unique_id) || [];
+            const ba = ca.length ? ca.reduce((s, v) => s + (rowPos.get(v) ?? 0), 0) / ca.length : (rowPos.get(a.unique_id) ?? 0);
+            const bb = cb.length ? cb.reduce((s, v) => s + (rowPos.get(v) ?? 0), 0) / cb.length : (rowPos.get(b.unique_id) ?? 0);
+            if (Math.abs(ba - bb) > 0.01) return ba - bb;
+            return baseSort(a, b);
+          }});
+          refreshRowPos();
+        }}
+      }}
+
+      // Precompute connected ancestors+descendants per node for 0ms hover path highlighting
+      const getConnectedSet = (centerUid) => {{
+        const connNodes = new Set([centerUid]);
+        const connEdges = new Set();
+        const qUp = [centerUid];
+        while (qUp.length > 0) {{
+          const cur = qUp.shift();
+          (parentsMap.get(cur) || []).forEach(p => {{
+            connEdges.add(p + "->" + cur);
+            if (!connNodes.has(p)) {{ connNodes.add(p); qUp.push(p); }}
+          }});
+        }}
+        const qDn = [centerUid];
+        while (qDn.length > 0) {{
+          const cur = qDn.shift();
+          (childrenMap.get(cur) || []).forEach(ch => {{
+            connEdges.add(cur + "->" + ch);
+            if (!connNodes.has(ch)) {{ connNodes.add(ch); qDn.push(ch); }}
+          }});
+        }}
+        return {{ connNodes, connEdges }};
+      }};
+
+      const ns = "http://www.w3.org/2000/svg";
+      const svgLayer = document.createElementNS(ns, "svg");
+      svgLayer.setAttribute("class", "dbt-dag-svg");
+
+      const cardDomById = new Map();
+      const cardMetaById = new Map();
+      const edgeSvgRefs = [];
+      let hoveredUid = "";
+
+      const applyHoverHighlight = (uid) => {{
+        hoveredUid = uid || "";
+        if (!hoveredUid) {{
+          cardDomById.forEach(dom => {{
+            dom.className = "dbt-dag-node" + (dom.getAttribute("data-uid") === focusUid ? " focus" : "");
+          }});
+          edgeSvgRefs.forEach(ref => {{
+            const stroke = ref.isSkip ? "#CBD5E1" : "#64748B";
+            const width = ref.isSkip ? "1.1" : "1.25";
+            const op = ref.isSkip ? "0.7" : "0.92";
+            ref.curve.setAttribute("stroke", stroke);
+            ref.curve.setAttribute("stroke-width", width);
+            ref.curve.setAttribute("stroke-opacity", op);
+            ref.arrow.setAttribute("stroke", stroke);
+            ref.arrow.setAttribute("stroke-width", width);
+            ref.arrow.setAttribute("stroke-opacity", op);
+          }});
+          return;
+        }}
+        const {{ connNodes, connEdges }} = getConnectedSet(hoveredUid);
+        cardDomById.forEach((dom, nid) => {{
+          const base = "dbt-dag-node" + (nid === focusUid ? " focus" : "");
+          dom.className = base + (connNodes.has(nid) ? " hl-active" : " hl-dim");
+        }});
+        edgeSvgRefs.forEach(ref => {{
+          const active = connEdges.has(ref.key);
+          const stroke = active ? "#1E293B" : "#CBD5E1";
+          const width = active ? "1.8" : "1.05";
+          const op = active ? "1" : "0.28";
+          ref.curve.setAttribute("stroke", stroke);
+          ref.curve.setAttribute("stroke-width", width);
+          ref.curve.setAttribute("stroke-opacity", op);
+          ref.arrow.setAttribute("stroke", stroke);
+          ref.arrow.setAttribute("stroke-width", width);
+          ref.arrow.setAttribute("stroke-opacity", op);
+        }});
+      }};
+
+      const maxRowsInAnyCol = Math.max(1, ...columns.map(c => c.length));
+      const colEls = columns.map((colNodes, colIdx) => {{
+        const cards = colNodes.map((n, rowIdx) => {{
+          const isFocus = n.unique_id === focusUid;
+          const cardEl = el("div", {{
+            className: "dbt-dag-node" + (isFocus ? " focus" : ""),
+            "data-uid": n.unique_id,
+            "data-rtype": n.resource_type,
+            title: n.unique_id + (isFocus ? " (Selected resource)" : " — Click to focus lineage"),
+            onMouseenter: () => applyHoverHighlight(n.unique_id),
+            onMouseleave: () => applyHoverHighlight(""),
+            onClick: () => {{
+              if (isFocus) return;
+              if (n.resource_type === "test") {{
+                showToast("dbt Test: " + n.name + " (" + n.unique_id + ")");
+                return;
+              }}
+              if (deepDives[n.unique_id]) {{
+                focusUniqueId = n.unique_id;
+                render();
+              }} else {{
+                dispatchAction(
+                  "dbt_deep_dive_model",
+                  {{ unique_id: n.unique_id, subtab: "lineage", orientation: lineageOrient, confirmed_in_gui: false }},
+                  "Tracing Lineage: " + n.name,
+                  "Fetching multi-hop dbt Platform lineage & node metadata..."
+                );
+              }}
+            }}
+          }}, [
+            makeDbtResBadge(n.resource_type, n.unique_id),
+            el("span", {{ className: "dbt-node-label", text: n.name }})
+          ]);
+          cardDomById.set(n.unique_id, cardEl);
+          cardMetaById.set(n.unique_id, {{ colIdx, rowIdx, colLen: colNodes.length }});
+          return cardEl;
+        }});
+        return el("div", {{ className: isTD ? "dbt-dag-col-td" : "dbt-dag-col-lr", "data-rank": String(colIdx) }}, cards);
+      }});
+
+      const columnsWrap = el("div", {{ className: isTD ? "dbt-dag-columns-td" : "dbt-dag-columns-lr" }}, colEls);
+      const stage = el("div", {{ className: "dbt-dag-stage", style: "transform:scale(" + lineageZoom + ");" }}, [svgLayer, columnsWrap]);
+      const zoomWrap = el("div", {{ className: "dbt-dag-zoom-wrap" }}, [stage]);
+      const viewport = el("div", {{ className: "dbt-dag-viewport" }}, [zoomWrap]);
+
+      // Drag-to-pan inside the dbt Explorer dot-grid viewport
+      let isPanning = false;
+      let panStartX = 0;
+      let panStartY = 0;
+      let scrollStartLeft = 0;
+      let scrollStartTop = 0;
+      viewport.addEventListener("mousedown", ev => {{
+        if (ev.target && ev.target.closest && ev.target.closest(".dbt-dag-node")) return;
+        isPanning = true;
+        panStartX = ev.clientX || 0;
+        panStartY = ev.clientY || 0;
+        scrollStartLeft = viewport.scrollLeft || 0;
+        scrollStartTop = viewport.scrollTop || 0;
+        viewport.className = "dbt-dag-viewport panning";
+      }});
+      viewport.addEventListener("mousemove", ev => {{
+        if (!isPanning) return;
+        viewport.scrollLeft = scrollStartLeft - ((ev.clientX || 0) - panStartX);
+        viewport.scrollTop = scrollStartTop - ((ev.clientY || 0) - panStartY);
+      }});
+      const stopPan = () => {{
+        if (isPanning) {{
+          isPanning = false;
+          viewport.className = "dbt-dag-viewport";
+        }}
+      }};
+      viewport.addEventListener("mouseup", stopPan);
+      viewport.addEventListener("mouseleave", stopPan);
+
+      const measureBox = (uid) => {{
+        const dom = cardDomById.get(uid);
+        const meta = cardMetaById.get(uid) || {{ colIdx: 0, rowIdx: 0, colLen: 1 }};
+        const w = dom ? Number(dom.offsetWidth || 0) : 0;
+        const h = dom ? Number(dom.offsetHeight || 0) : 0;
+        if (dom && w > 0 && h > 0) {{
+          let x = 0;
+          let y = 0;
+          let cur = dom;
+          while (cur && cur !== stage) {{
+            x += Number(cur.offsetLeft || 0);
+            y += Number(cur.offsetTop || 0);
+            cur = cur.offsetParent;
+          }}
+          return {{ left: x, top: y, right: x + w, bottom: y + h, cx: x + w / 2, cy: y + h / 2, w, h }};
+        }}
+        // Deterministic mathematical geometry fallback (e.g. pre-paint or headless DOM tests)
+        const fw = 192;
+        const fh = 52;
+        if (isTD) {{
+          const padX = Math.max(0, ((maxRowsInAnyCol - meta.colLen) * (fw + 15)) / 2);
+          const fx = 32 + padX + meta.rowIdx * (fw + 15);
+          const fy = 28 + meta.colIdx * (fh + 54);
+          return {{ left: fx, top: fy, right: fx + fw, bottom: fy + fh, cx: fx + fw / 2, cy: fy + fh / 2, w: fw, h: fh }};
+        }}
+        const padY = Math.max(0, ((maxRowsInAnyCol - meta.colLen) * (fh + 15)) / 2);
+        const fx = 32 + meta.colIdx * (fw + 76);
+        const fy = 28 + padY + meta.rowIdx * (fh + 15);
+        return {{ left: fx, top: fy, right: fx + fw, bottom: fy + fh, cx: fx + fw / 2, cy: fy + fh / 2, w: fw, h: fh }};
+      }};
+
+      const drawEdges = () => {{
+        while (svgLayer.firstChild) svgLayer.removeChild(svgLayer.firstChild);
+        edgeSvgRefs.length = 0;
+
+        let maxX = Number(stage.offsetWidth || 0);
+        let maxY = Number(stage.offsetHeight || 0);
+        const boxes = new Map();
+        visNodes.forEach((_, uid) => {{
+          const b = measureBox(uid);
+          boxes.set(uid, b);
+          if (b.right + 32 > maxX) maxX = b.right + 32;
+          if (b.bottom + 28 > maxY) maxY = b.bottom + 28;
+        }});
+
+        svgLayer.setAttribute("width", String(Math.max(100, Math.ceil(maxX))));
+        svgLayer.setAttribute("height", String(Math.max(100, Math.ceil(maxY))));
+        svgLayer.setAttribute("viewBox", "0 0 " + Math.max(100, Math.ceil(maxX)) + " " + Math.max(100, Math.ceil(maxY)));
+        if (Number(stage.offsetWidth || 0) > 0) {{
+          zoomWrap.setAttribute(
+            "style",
+            "width:" + Math.ceil(stage.offsetWidth * lineageZoom) + "px;height:" + Math.ceil(stage.offsetHeight * lineageZoom) + "px;"
+          );
+        }}
+
+        // Draw skip-rank edges first (underneath primary adjacent-rank curves, matching dbt Explorer)
+        const orderedEdges = [...dagEdgesClean].sort((a, b) => {{
+          const spanA = Math.abs((cardMetaById.get(a.target)?.colIdx || 0) - (cardMetaById.get(a.source)?.colIdx || 0));
+          const spanB = Math.abs((cardMetaById.get(b.target)?.colIdx || 0) - (cardMetaById.get(b.source)?.colIdx || 0));
+          return spanB - spanA;
+        }});
+
+        orderedEdges.forEach(e => {{
+          const sb = boxes.get(e.source);
+          const tb = boxes.get(e.target);
+          if (!sb || !tb) return;
+          const cSrc = cardMetaById.get(e.source)?.colIdx || 0;
+          const cDst = cardMetaById.get(e.target)?.colIdx || 0;
+          const isSkip = Math.abs(cDst - cSrc) > 1;
+          const stroke = isSkip ? "#CBD5E1" : "#64748B";
+          const sw = isSkip ? "1.1" : "1.25";
+          const op = isSkip ? "0.7" : "0.92";
+
+          let dCurve = "";
+          let dArrow = "";
+          if (isTD) {{
+            const x1 = sb.cx;
+            const y1 = sb.bottom;
+            const x2 = tb.cx;
+            const y2 = tb.top - 1;
+            const dy = Math.max(26, Math.abs(y2 - y1) * 0.48);
+            dCurve = "M " + x1.toFixed(1) + " " + y1.toFixed(1) +
+                     " C " + x1.toFixed(1) + " " + (y1 + dy).toFixed(1) +
+                     ", " + x2.toFixed(1) + " " + (y2 - dy).toFixed(1) +
+                     ", " + x2.toFixed(1) + " " + y2.toFixed(1);
+            dArrow = "M " + (x2 - 3.8).toFixed(1) + " " + (y2 - 5.5).toFixed(1) +
+                     " L " + x2.toFixed(1) + " " + y2.toFixed(1) +
+                     " L " + (x2 + 3.8).toFixed(1) + " " + (y2 - 5.5).toFixed(1);
+          }} else {{
+            const x1 = sb.right;
+            const y1 = sb.cy;
+            const x2 = tb.left - 1;
+            const y2 = tb.cy;
+            const dx = Math.max(34, Math.abs(x2 - x1) * 0.48);
+            dCurve = "M " + x1.toFixed(1) + " " + y1.toFixed(1) +
+                     " C " + (x1 + dx).toFixed(1) + " " + y1.toFixed(1) +
+                     ", " + (x2 - dx).toFixed(1) + " " + y2.toFixed(1) +
+                     ", " + x2.toFixed(1) + " " + y2.toFixed(1);
+            dArrow = "M " + (x2 - 5.5).toFixed(1) + " " + (y2 - 3.8).toFixed(1) +
+                     " L " + x2.toFixed(1) + " " + y2.toFixed(1) +
+                     " L " + (x2 - 5.5).toFixed(1) + " " + (y2 + 3.8).toFixed(1);
+          }}
+
+          const curve = document.createElementNS(ns, "path");
+          curve.setAttribute("class", "dbt-dag-edge");
+          curve.setAttribute("d", dCurve);
+          curve.setAttribute("fill", "none");
+          curve.setAttribute("stroke", stroke);
+          curve.setAttribute("stroke-width", sw);
+          curve.setAttribute("stroke-opacity", op);
+          curve.setAttribute("stroke-linecap", "round");
+          svgLayer.appendChild(curve);
+
+          const arrow = document.createElementNS(ns, "path");
+          arrow.setAttribute("class", "dbt-dag-arrow");
+          arrow.setAttribute("d", dArrow);
+          arrow.setAttribute("fill", "none");
+          arrow.setAttribute("stroke", stroke);
+          arrow.setAttribute("stroke-width", sw);
+          arrow.setAttribute("stroke-opacity", op);
+          arrow.setAttribute("stroke-linecap", "round");
+          arrow.setAttribute("stroke-linejoin", "round");
+          svgLayer.appendChild(arrow);
+
+          edgeSvgRefs.push({{ key: e.source + "->" + e.target, curve, arrow, isSkip }});
+        }});
+
+        if (hoveredUid) applyHoverHighlight(hoveredUid);
+      }};
+
+      // Resource Type Filter Chips (SED, MDL, SEM, TST, SRC, MTR, EXP, SNP)
+      const typeChips = presentTypes.map(rt => {{
+        const meta = DBT_RES_META[rt] || DBT_RES_META.model;
+        const isOff = Boolean(lineageHiddenTypes[rt]);
+        return el("button", {{
+          type: "button",
+          className: "dbt-type-filter-chip" + (isOff ? " off" : ""),
+          title: (isOff ? "Show " : "Hide ") + meta.label + " in lineage graph (0ms)",
+          onClick: () => {{
+            lineageHiddenTypes[rt] = !lineageHiddenTypes[rt];
+            render();
+          }}
+        }}, [
+          el("span", {{ className: "dbt-type-dot", style: "background:" + meta.bg + ";" }}),
+          el("span", {{ text: meta.code + " (" + typeCounts[rt] + ")" }})
+        ]);
+      }});
+
+      const zoomControls = el("div", {{ className: "dbt-zoom-group" }}, [
+        el("button", {{
+          type: "button",
+          className: "dbt-zoom-btn",
+          title: "Zoom out",
+          text: "-",
+          onClick: () => {{ lineageZoom = Math.max(0.6, Math.round((lineageZoom - 0.15) * 100) / 100); render(); }}
+        }}),
+        el("button", {{
+          type: "button",
+          className: "dbt-zoom-btn",
+          title: "Reset zoom to 100%",
+          text: Math.round(lineageZoom * 100) + "%",
+          onClick: () => {{ lineageZoom = 1.0; render(); }}
+        }}),
+        el("button", {{
+          type: "button",
+          className: "dbt-zoom-btn",
+          title: "Zoom in",
+          text: "+",
+          onClick: () => {{ lineageZoom = Math.min(1.45, Math.round((lineageZoom + 0.15) * 100) / 100); render(); }}
+        }})
+      ]);
+
+      container.appendChild(el("div", {{ className: "card" }}, [
+        el("div", {{ className: "row-between" }}, [
+          el("div", null, [
+            el("div", {{ style: "font-weight:800;font-size:14.5px;", text: "dbt Platform Lineage Graph" }}),
+            el("div", {{ style: "font-size:11.8px;color:var(--muted);", text: visNodes.size + " resources · " + dagEdgesClean.length + " dependencies · Hover to highlight path, click any node to refocus" }})
+          ]),
+          el("div", {{ style: "display:flex;align-items:center;gap:6px;flex-wrap:wrap;" }}, [
+            zoomControls,
+            iconBtn({{
+              type: "button",
+              className: "btn btn-sm",
+              onClick: () => {{
+                lineageOrient = isTD ? "lr" : "td";
+                render();
+              }}
+            }}, isTD ? "rows" : "columns", isTD ? "Top-Down" : "Left-to-Right")
+          ])
+        ]),
+        presentTypes.length > 1 ? el("div", {{ className: "chip-bar" }}, typeChips) : null,
+        viewport
+      ]));
+
+      // Draw Bezier curves synchronously (using layout or fallback math) AND refine after browser paint
+      drawEdges();
+      activeLineageRedraw = drawEdges;
+      if (typeof window.requestAnimationFrame === "function") {{
+        window.requestAnimationFrame(() => {{
+          drawEdges();
+          const focusBox = cardDomById.get(focusUid) ? measureBox(focusUid) : null;
+          if (focusBox && viewport.clientWidth > 0 && stage.offsetWidth * lineageZoom > viewport.clientWidth) {{
+            viewport.scrollLeft = Math.max(0, Math.round(focusBox.cx * lineageZoom - viewport.clientWidth / 2));
+          }}
+        }});
+      }}
+    }}
+
+    // ==========================================================================
     // TAB 2: UNIFIED MODELS, HEALTH, SOURCES & LINEAGE (0ms Catalog + Deep Dive)
     // ==========================================================================
     function renderTab2CatalogAndLineage(container) {{
@@ -2330,16 +3371,21 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
       const deepDives = STATE.model_deep_dives || {{}};
       const jobs = Array.isArray(STATE.jobs) ? STATE.jobs : [];
       const defaultJobId = String(STATE.selected_job_id || (jobs[0] && jobs[0].id) || "");
-      const allRes = [...models, ...sources, ...exposures];
+      const allRes = allUnifiedResources();
+      const seeds = allRes.filter(r => r.kind === "seed");
+      const semModels = allRes.filter(r => r.kind === "semantic_model");
 
       if (catalogViewMode === "detail" && focusUniqueId) {{
         const item = allRes.find(r => r.unique_id === focusUniqueId || r.name === focusUniqueId) || {{
           unique_id: focusUniqueId,
           name: focusUniqueId.split(".").pop(),
-          kind: focusUniqueId.split(".")[0] || "model",
+          kind: normalizeResType("", focusUniqueId),
           ref_snippet: "{{{{ ref('" + focusUniqueId.split(".").pop() + "') }}}}"
         }};
         const dd = deepDives[item.unique_id] || deepDives[focusUniqueId] || null;
+        const linNodeCount = dd
+          ? ((Array.isArray(dd.dag_nodes) && dd.dag_nodes.length) ? dd.dag_nodes.length : ((dd.upstream || []).length + (dd.downstream || []).length + 1))
+          : 0;
 
         // Detail Top Summary + Immediate Actions + Deep-Dive Trigger
         container.appendChild(el("div", {{ className: "card" }}, [
@@ -2347,7 +3393,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
             iconBtn({{ type: "button", className: "btn btn-sm", onClick: () => {{ catalogViewMode = "list"; render(); }} }}, "arrow-left", "All Resources (" + allRes.length + ")"),
             el("div", {{ style: "display:flex;gap:6px;flex-wrap:wrap;" }}, [
               item.ref_snippet ? iconBtn({{ type: "button", className: "btn btn-sm", onClick: () => openInSqlRunner(item.ref_snippet) }}, "terminal", "Query in SQL Runner") : null,
-              (item.kind === "mart" || item.kind === "model") && defaultJobId ? iconBtn({{
+              (item.kind === "mart" || item.kind === "model" || item.kind === "seed") && defaultJobId ? iconBtn({{
                 type: "button",
                 className: "btn btn-sm btn-primary",
                 onClick: () => openTriggerModal(defaultJobId, "dbt build --select +" + item.name + "+", "Selective build for " + item.name)
@@ -2355,23 +3401,26 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
               (!dd || !dd.has_perf) ? iconBtn({{
                 type: "button",
                 className: "btn btn-sm btn-navy",
-                onClick: () => dispatchAction("dbt_deep_dive_model", {{ unique_id: item.unique_id, subtab: catalogSubtab, orientation: lineageOrient, confirmed_in_gui: false }}, "Inspecting " + item.name, "Fetching lineage, compiled SQL, column schema & run performance history...")
+                onClick: () => dispatchAction("dbt_deep_dive_model", {{ unique_id: item.unique_id, subtab: catalogSubtab, orientation: lineageOrient, confirmed_in_gui: false }}, "Inspecting " + item.name, "Fetching multi-hop lineage, compiled SQL, column schema & run performance history...")
               }}, "activity", dd ? "Load Run Performance History" : "Deep-Dive Lineage, SQL & Health") : null
             ])
           ]),
-          el("div", null, [
-            el("div", {{ style: "display:flex;gap:6px;align-items:center;flex-wrap:wrap;" }}, [
-              el("span", {{ className: statusPillClass(item.status_badge || item.kind), text: String(item.status_badge || item.kind).toUpperCase() }}),
-              (dd && dd.materialization) || item.materialization ? el("span", {{ className: "pill pill-neutral", text: "Materialized: " + ((dd && dd.materialization) || item.materialization) }}) : null,
-              dd ? el("span", {{ className: "pill pill-ok", text: "Deep-Dive Loaded" }}) : null
-            ]),
-            el("h2", {{ style: "font-size:17px;font-weight:800;margin-top:5px;font-family:var(--mono);", text: item.name }}),
-            el("div", {{ style: "font-size:12px;color:var(--muted);font-family:var(--mono);", text: item.unique_id }}),
-            ((dd && dd.description) || item.description) ? el("p", {{ style: "margin-top:6px;color:var(--secondary);", text: (dd && dd.description) || item.description }}) : null
+          el("div", {{ style: "display:flex;align-items:flex-start;gap:12px;" }}, [
+            makeDbtResBadge((dd && dd.resource_type) || item.kind, item.unique_id),
+            el("div", {{ style: "min-width:0;flex:1;" }}, [
+              el("div", {{ style: "display:flex;gap:6px;align-items:center;flex-wrap:wrap;" }}, [
+                el("span", {{ className: statusPillClass(item.status_badge || item.kind), text: String(item.status_badge || item.kind).toUpperCase() }}),
+                (dd && dd.materialization) || item.materialization ? el("span", {{ className: "pill pill-neutral", text: "Materialized: " + ((dd && dd.materialization) || item.materialization) }}) : null,
+                dd ? el("span", {{ className: "pill pill-ok", text: "Deep-Dive Loaded" }}) : null
+              ]),
+              el("h2", {{ style: "font-size:17px;font-weight:800;margin-top:4px;font-family:var(--mono);", text: item.name }}),
+              el("div", {{ style: "font-size:12px;color:var(--muted);font-family:var(--mono);", text: item.unique_id }}),
+              ((dd && dd.description) || item.description) ? el("p", {{ style: "margin-top:6px;color:var(--secondary);", text: (dd && dd.description) || item.description }}) : null
+            ])
           ]),
           el("div", {{ className: "seg-bar", style: "padding-top:4px;border-top:1px solid var(--border);" }}, [
             ["overview", "Overview & Health"],
-            ["lineage", "Lineage Graph" + (dd ? " (" + ((dd.upstream || []).length + (dd.downstream || []).length) + ")" : "")],
+            ["lineage", "Lineage Graph" + (linNodeCount ? " (" + linNodeCount + ")" : "")],
             ["sql", "Columns & SQL" + (dd && dd.columns ? " (" + dd.columns.length + ")" : "")]
           ].map(([k, lbl]) =>
             el("button", {{ type: "button", className: "chip" + (catalogSubtab === k ? " active" : ""), text: lbl, onClick: () => {{ catalogSubtab = k; render(); }} }})
@@ -2381,13 +3430,13 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
         if (!dd) {{
           container.appendChild(el("div", {{ className: "card" }}, [
             el("div", {{ style: "font-weight:800;", text: "Catalog Metadata Ready — Run Deep Dive for Full Lineage, SQL & Build History" }}),
-            el("div", {{ style: "font-size:12.8px;color:var(--secondary);", text: "To keep browsing instant, column-level schemas, compiled warehouse SQL, DAG edges, and historical run durations are fetched on demand." }}),
+            el("div", {{ style: "font-size:12.8px;color:var(--secondary);", text: "To keep browsing instant, column-level schemas, compiled warehouse SQL, multi-hop DAG edges, and historical run durations are fetched on demand." }}),
             item.ref_snippet ? el("pre", {{ className: "code-box", text: "-- dbt Reference Snippet\\nSELECT *\\nFROM " + item.ref_snippet + "\\nLIMIT 25" }}) : null,
             el("div", {{ className: "action-footer" }}, [
               iconBtn({{
                 type: "button",
                 className: "btn btn-primary",
-                onClick: () => dispatchAction("dbt_deep_dive_model", {{ unique_id: item.unique_id, subtab: catalogSubtab, orientation: lineageOrient, confirmed_in_gui: false }}, "Deep-Diving " + item.name, "Fetching upstream/downstream lineage, compiled SQL, columns & health...")
+                onClick: () => dispatchAction("dbt_deep_dive_model", {{ unique_id: item.unique_id, subtab: catalogSubtab, orientation: lineageOrient, confirmed_in_gui: false }}, "Deep-Diving " + item.name, "Fetching multi-hop lineage, compiled SQL, columns & health...")
               }}, "layers", "Run Deep Dive on " + item.name, "arrow-right")
             ])
           ]));
@@ -2418,55 +3467,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
             ]) : null
           ]));
         }} else if (catalogSubtab === "lineage") {{
-          const isTD = lineageOrient === "td";
-          const up = Array.isArray(dd.upstream) ? dd.upstream : [];
-          const down = Array.isArray(dd.downstream) ? dd.downstream : [];
-          const makeNode = (n, isFocus) => el("div", {{
-            className: "lin-node" + (isFocus ? " focus" : ""),
-            onClick: () => {{
-              if (isFocus) return;
-              if (deepDives[n.unique_id]) {{
-                focusUniqueId = n.unique_id;
-                render();
-              }} else {{
-                dispatchAction("dbt_deep_dive_model", {{ unique_id: n.unique_id, subtab: "lineage", orientation: lineageOrient, confirmed_in_gui: false }}, "Tracing Lineage: " + n.name, "Fetching dependency graph & node details from dbt Cloud...");
-              }}
-            }}
-          }}, [
-            el("div", {{ className: "row-between" }}, [
-              el("span", {{ className: "pill pill-neutral", style: "font-size:10px;", text: String(n.resource_type || "model").toUpperCase() }}),
-              (!isFocus && deepDives[n.unique_id]) ? el("span", {{ style: "font-size:10px;color:var(--ok-text);font-weight:700;", text: "Cached" }}) : null
-            ]),
-            el("div", {{ style: "font-weight:700;font-family:var(--mono);font-size:12px;margin-top:3px;", text: n.name || n.unique_id }})
-          ]);
-
-          container.appendChild(el("div", {{ className: "card" }}, [
-            el("div", {{ className: "row-between" }}, [
-              el("div", {{ style: "font-weight:800;", text: "Upstream & Downstream Dependency Graph" }}),
-              iconBtn({{ type: "button", className: "btn btn-sm", onClick: () => {{
-                lineageOrient = isTD ? "lr" : "td";
-                render();
-              }} }}, isTD ? "rows" : "columns", isTD ? "Top-Down" : "Left-to-Right")
-            ]),
-            el("div", {{ className: "lineage-grid" }}, [
-              el("div", {{ className: isTD ? "lin-flow-td" : "lin-flow-lr" }}, [
-                el("div", {{ className: "lin-col" }}, [
-                  el("div", {{ style: "font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;", text: "Upstream (" + up.length + ")" }}),
-                  ...(up.length ? up.map(n => makeNode(n, false)) : [el("div", {{ style: "font-size:12px;color:var(--muted);", text: "No upstream parents" }})])
-                ]),
-                el("div", {{ style: "display:flex;align-items:center;justify-content:center;color:#64748B;" }}, [makeIcon(isTD ? "arrow-down" : "arrow-right", 16)]),
-                el("div", {{ className: "lin-col" }}, [
-                  el("div", {{ style: "font-size:11px;font-weight:800;color:#B9381E;text-transform:uppercase;", text: "Selected Resource" }}),
-                  makeNode({{ unique_id: dd.unique_id, name: dd.name, resource_type: dd.resource_type }}, true)
-                ]),
-                el("div", {{ style: "display:flex;align-items:center;justify-content:center;color:#64748B;" }}, [makeIcon(isTD ? "arrow-down" : "arrow-right", 16)]),
-                el("div", {{ className: "lin-col" }}, [
-                  el("div", {{ style: "font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;", text: "Downstream (" + down.length + ")" }}),
-                  ...(down.length ? down.map(n => makeNode(n, false)) : [el("div", {{ style: "font-size:12px;color:var(--muted);", text: "Leaf node" }})])
-                ])
-              ])
-            ])
-          ]));
+          renderDbtPlatformLineage(container, dd, deepDives);
         }} else {{
           const cols = Array.isArray(dd.columns) ? dd.columns : [];
           const sqlStr = codeMode === "compiled" ? (dd.compiled_sql || dd.raw_sql) : (dd.raw_sql || dd.compiled_sql);
@@ -2497,7 +3498,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
       const searchInp = el("input", {{
         type: "search",
         value: catalogSearchText,
-        placeholder: "Instant 0ms filter across marts, models, sources & exposures (or click AI Search for semantic match)...",
+        placeholder: "Instant 0ms filter across marts, models, seeds, sources, semantic models & exposures...",
         onInput: ev => {{ catalogSearchText = ev.target.value; renderCatalogItemsOnly(); }}
       }});
 
@@ -2505,7 +3506,9 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
         const filtered = allRes.filter(item => {{
           if (catalogKindFilter === "mart" && item.kind !== "mart") return false;
           if (catalogKindFilter === "model" && item.kind !== "model" && item.kind !== "mart") return false;
+          if (catalogKindFilter === "seed" && item.kind !== "seed") return false;
           if (catalogKindFilter === "source" && item.kind !== "source") return false;
+          if (catalogKindFilter === "semantic_model" && item.kind !== "semantic_model") return false;
           if (catalogKindFilter === "exposure" && item.kind !== "exposure") return false;
           if (catalogKindFilter === "attention" && item.status_bucket !== "error" && item.status_bucket !== "warn") return false;
           if (catalogSearchText) {{
@@ -2522,13 +3525,16 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
             className: "queue-item",
             onClick: () => {{ focusUniqueId = item.unique_id; catalogViewMode = "detail"; render(); }}
           }}, [
-            el("div", {{ style: "min-width:0;flex:1;" }}, [
-              el("div", {{ style: "display:flex;align-items:center;gap:6px;flex-wrap:wrap;" }}, [
-                el("span", {{ className: statusPillClass(item.status_badge || item.kind), text: String(item.status_badge || item.kind).toUpperCase() }}),
-                el("span", {{ style: "font-weight:800;font-family:var(--mono);", text: item.name }}),
-                isCached ? el("span", {{ className: "pill pill-neutral", style: "font-size:10.5px;", text: "Lineage & SQL Ready" }}) : null
-              ]),
-              item.description ? el("div", {{ style: "font-size:12px;color:var(--secondary);margin-top:2px;", text: item.description }}) : el("div", {{ style: "font-size:11.5px;color:var(--muted);font-family:var(--mono);", text: item.unique_id }})
+            el("div", {{ style: "display:flex;align-items:center;gap:10px;min-width:0;flex:1;" }}, [
+              makeDbtResBadge(item.kind, item.unique_id),
+              el("div", {{ style: "min-width:0;flex:1;" }}, [
+                el("div", {{ style: "display:flex;align-items:center;gap:6px;flex-wrap:wrap;" }}, [
+                  el("span", {{ style: "font-weight:800;font-family:var(--mono);", text: item.name }}),
+                  el("span", {{ className: statusPillClass(item.status_badge || item.kind), text: String(item.status_badge || item.kind).toUpperCase() }}),
+                  isCached ? el("span", {{ className: "pill pill-neutral", style: "font-size:10.5px;", text: "Lineage & SQL Ready" }}) : null
+                ]),
+                item.description ? el("div", {{ style: "font-size:12px;color:var(--secondary);margin-top:2px;", text: item.description }}) : el("div", {{ style: "font-size:11.5px;color:var(--muted);font-family:var(--mono);", text: item.unique_id }})
+              ])
             ]),
             el("div", {{ style: "display:flex;gap:6px;align-items:center;" }}, [
               item.ref_snippet ? iconBtn({{
@@ -2556,9 +3562,11 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
         el("div", {{ className: "chip-bar" }}, [
           ["all", "All (" + allRes.length + ")"],
           ["mart", "Marts (" + marts.length + ")"],
-          ["model", "All Models (" + models.length + ")"],
-          ["source", "Raw Sources (" + sources.length + ")"],
-          ["exposure", "BI Exposures (" + exposures.length + ")"],
+          ["model", "Models (" + models.length + ")"],
+          ...(seeds.length > 0 ? [["seed", "Seeds (" + seeds.length + ")"]] : []),
+          ["source", "Sources (" + sources.length + ")"],
+          ...(semModels.length > 0 ? [["semantic_model", "Semantic Models (" + semModels.length + ")"]] : []),
+          ["exposure", "Exposures (" + exposures.length + ")"],
           ...(attnCount > 0 ? [["attention", "Needs Attention (" + attnCount + ")"]] : [])
         ].map(([k, lbl]) =>
           el("button", {{ type: "button", className: "chip" + (catalogKindFilter === k ? " active" : ""), text: lbl, onClick: () => {{ catalogKindFilter = k; render(); }} }})
@@ -2896,6 +3904,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
     }}
 
     function render() {{
+      activeLineageRedraw = null;
       renderHeader();
       const root = document.getElementById("appRoot");
       root.replaceChildren();

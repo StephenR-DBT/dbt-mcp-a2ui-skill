@@ -1,0 +1,951 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>dbt MCP — Gemini Enterprise Canvas Master Workbench (All 5 Workflows)</title>
+    <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+
+        .font-mono {
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        /* Dotted Canvas Grid from Lineage Screenshot */
+        .lineage-canvas {
+            background-color: #f8fafc;
+            background-image: radial-gradient(#cbd5e1 1.2px, transparent 1.2px);
+            background-size: 16px 16px;
+        }
+
+        /* Custom Scrollbars */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #f1f5f9;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 3px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8;
+        }
+
+        /* Smooth Transition for Container Resizing */
+        #device-container {
+            transition: max-width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+    </style>
+</head>
+
+<body class="bg-slate-100 text-slate-800 antialiased p-2 sm:p-5 min-h-screen">
+
+    <!-- Top Controller Bar: Device & Master Workflow Switcher -->
+    <header class="max-w-5xl mx-auto mb-4 bg-white border border-slate-200 rounded-xl p-3 sm:p-4 shadow-sm space-y-3">
+        <div class="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-100">
+            <div class="flex items-center gap-2.5">
+                <!-- dbt Labs Logo SVG -->
+                <div class="flex items-center gap-2 bg-[#040a14] px-2.5 py-1.5 rounded-lg text-white">
+                    <svg class="w-5 h-5 text-[#ff694b]" viewBox="0 0 24 24" fill="currentColor">
+                        <path
+                            d="M19.4 3L12 10.4 4.6 3 2 5.6l7.4 7.4L2 20.4 4.6 23l7.4-7.4 7.4 7.4 2.6-2.6-7.4-7.4L22 5.6 19.4 3zM12 12.8L10.2 11 12 9.2 13.8 11 12 12.8z" />
+                    </svg>
+                    <span class="text-xs font-bold tracking-wider uppercase text-white">dbt Labs</span>
+                </div>
+                <div>
+                    <h1 class="text-sm font-semibold text-slate-900 leading-tight">Gemini Enterprise Workbench</h1>
+                    <p class="text-[11px] text-slate-500">Interactive UI Designs for All 5 dbt-mcp Workflows</p>
+                </div>
+            </div>
+
+            <!-- Device Frame Simulator Selector -->
+            <div
+                class="flex items-center bg-slate-100 p-1 rounded-lg border border-slate-200 text-xs font-medium text-slate-600">
+                <button id="btn-desktop" onclick="setDevice('desktop')"
+                    class="px-2.5 py-1 rounded-md bg-white text-slate-900 shadow-xs transition">Desktop Canvas</button>
+                <button id="btn-tablet" onclick="setDevice('tablet')"
+                    class="px-2.5 py-1 rounded-md hover:text-slate-900 transition">Tablet (768px)</button>
+                <button id="btn-mobile" onclick="setDevice('mobile')"
+                    class="px-2.5 py-1 rounded-md hover:text-slate-900 transition">Mobile (390px)</button>
+            </div>
+        </div>
+
+        <!-- Master Workflow Tabs (All 5 Workflows from gemini-enterprise-workflows.md) -->
+        <div class="flex items-center gap-1.5 overflow-x-auto text-xs pb-1">
+            <button id="wf-tab-1" onclick="switchWorkflow(1)"
+                class="px-3 py-1.5 rounded-lg font-semibold bg-slate-900 text-white shadow-xs whitespace-nowrap flex items-center gap-1.5 transition">
+                <span>1. Metric Explorer</span>
+            </button>
+            <button id="wf-tab-2" onclick="switchWorkflow(2)"
+                class="px-3 py-1.5 rounded-lg font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 whitespace-nowrap flex items-center gap-1.5 transition">
+                <span>2. Health & Freshness Audit</span>
+            </button>
+            <button id="wf-tab-3" onclick="switchWorkflow(3)"
+                class="px-3 py-1.5 rounded-lg font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 whitespace-nowrap flex items-center gap-1.5 transition">
+                <span>3. Column Lineage (CLL)</span>
+            </button>
+            <button id="wf-tab-4" onclick="switchWorkflow(4)"
+                class="px-3 py-1.5 rounded-lg font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 whitespace-nowrap flex items-center gap-1.5 transition">
+                <span>4. Incident & Safe Retry</span>
+            </button>
+            <button id="wf-tab-5" onclick="switchWorkflow(5)"
+                class="px-3 py-1.5 rounded-lg font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 whitespace-nowrap flex items-center gap-1.5 transition">
+                <span>5. dbt Mesh Catalog</span>
+            </button>
+        </div>
+    </header>
+
+    <!-- Device Frame Simulator Container -->
+    <main class="max-w-5xl mx-auto flex justify-center">
+        <div id="device-container"
+            class="w-full bg-white rounded-2xl shadow-lg border border-slate-200 overflow-hidden">
+
+            <!-- Surface Top Header (Gemini Canvas Tab Container) -->
+            <div
+                class="bg-[#040a14] text-white px-4 py-2.5 flex items-center justify-between border-b border-slate-800">
+                <div class="flex items-center gap-2">
+                    <span class="w-2.5 h-2.5 rounded-full bg-[#ff694b] animate-pulse"></span>
+                    <span id="canvas-tab-title"
+                        class="text-xs font-semibold tracking-wider text-slate-200 uppercase font-mono">dbt-mcp ::
+                        Metric Explorer</span>
+                </div>
+                <div class="flex items-center gap-2 text-xs text-slate-400">
+                    <span id="canvas-tab-subtitle"
+                        class="hidden sm:inline bg-slate-800/80 px-2 py-0.5 rounded text-[11px] font-mono text-slate-300">Semantic
+                        Layer v1.9</span>
+                    <span class="w-2 h-2 rounded-full bg-emerald-500" title="Connected to dbt Cloud"></span>
+                </div>
+            </div>
+
+            <!-- ===================================================================== -->
+            <!-- WORKFLOW 1: GOVERNED METRIC EXPLORER (Semantic Layer)                 -->
+            <!-- ===================================================================== -->
+            <div id="view-wf-1" class="workflow-view p-4 sm:p-6 space-y-5">
+                <!-- Natural Language Prompt Summary Bar -->
+                <div
+                    class="bg-slate-50 border border-slate-200 rounded-xl p-3 sm:p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div class="flex items-center gap-3">
+                        <div
+                            class="w-8 h-8 rounded-lg bg-purple-100 text-purple-700 flex items-center justify-center font-bold text-sm">
+                            ∑</div>
+                        <div>
+                            <p class="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">Governed
+                                Semantic Query</p>
+                            <h2 class="text-base sm:text-lg font-bold text-slate-900">Monthly Active Users (MAU) & Net
+                                Revenue</h2>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-1.5 self-start sm:self-auto">
+                        <span
+                            class="px-2 py-0.5 text-[11px] font-semibold rounded bg-emerald-50 text-emerald-800 border border-emerald-200">✓
+                            Governed Metric</span>
+                        <span
+                            class="px-2 py-0.5 text-[11px] font-semibold rounded bg-purple-50 text-purple-800 border border-purple-200">SL:
+                            core_users</span>
+                    </div>
+                </div>
+
+                <!-- Filter & Grain Controls (Pill Bar) -->
+                <div
+                    class="flex flex-wrap items-center justify-between gap-2 text-xs bg-white border border-slate-200 rounded-xl p-3 shadow-xs">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <label class="font-semibold text-slate-600">Time Grain:</label>
+                        <div class="flex items-center bg-slate-100 p-0.5 rounded-lg border border-slate-200">
+                            <button
+                                class="px-2 py-0.5 rounded bg-white text-slate-900 font-semibold shadow-xs">Monthly</button>
+                            <button class="px-2 py-0.5 rounded text-slate-600 hover:text-slate-900">Quarterly</button>
+                            <button class="px-2 py-0.5 rounded text-slate-600 hover:text-slate-900">Weekly</button>
+                        </div>
+                        <span class="text-slate-300">|</span>
+                        <label class="font-semibold text-slate-600">Region:</label>
+                        <span class="px-2 py-0.5 bg-slate-100 rounded text-slate-700 font-medium">North America,
+                            EMEA</span>
+                    </div>
+                    <div class="text-[11px] text-slate-400 font-mono">
+                        query_metrics(metrics=["mau", "net_rev"])
+                    </div>
+                </div>
+
+                <!-- Metric Scorecards Grid -->
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-xs space-y-1">
+                        <div class="flex items-center justify-between text-xs text-slate-500">
+                            <span class="font-medium">Monthly Active Users (MAU)</span>
+                            <span class="text-emerald-600 font-semibold flex items-center gap-1">↑ +8.4% MoM</span>
+                        </div>
+                        <div class="text-2xl sm:text-3xl font-bold text-slate-900">142,500</div>
+                        <p class="text-[11px] text-slate-400">Definition: <code
+                                class="font-mono text-slate-600">count(distinct user_id)</code></p>
+                    </div>
+
+                    <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-xs space-y-1">
+                        <div class="flex items-center justify-between text-xs text-slate-500">
+                            <span class="font-medium">Net Revenue (NRR)</span>
+                            <span class="text-emerald-600 font-semibold flex items-center gap-1">↑ +14.2% YoY</span>
+                        </div>
+                        <div class="text-2xl sm:text-3xl font-bold text-slate-900">$1,840,250</div>
+                        <p class="text-[11px] text-slate-400">Definition: <code
+                                class="font-mono text-slate-600">sum(order_amount - refund_amount)</code></p>
+                    </div>
+                </div>
+
+                <!-- Interactive Data Preview Table -->
+                <div class="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs">
+                    <div
+                        class="px-4 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between text-xs">
+                        <span class="font-semibold text-slate-800">Result Breakdown by Dimension</span>
+                        <button onclick="toggleCompiledSql()"
+                            class="text-blue-600 hover:text-blue-800 font-mono text-[11px]">[View Compiled SQL]</button>
+                    </div>
+
+                    <div id="compiled-sql-panel"
+                        class="hidden bg-slate-900 text-slate-200 p-3 font-mono text-xs overflow-x-auto border-b border-slate-800">
+                        <pre>-- Generated via dbt Semantic Layer (get_metrics_compiled_sql)
+SELECT
+  DATE_TRUNC('month', order_date) as order_month,
+  customer_region,
+  COUNT(DISTINCT user_id) as monthly_active_users,
+  SUM(gross_amount - refunds) as net_revenue
+FROM {{ ref('fct_orders') }}
+WHERE order_date >= '2026-07-01'
+GROUP BY 1, 2 ORDER BY 1 DESC;</pre>
+                    </div>
+
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left text-xs text-slate-700">
+                            <thead
+                                class="bg-slate-100 text-slate-600 text-[11px] uppercase font-semibold border-b border-slate-200">
+                                <tr>
+                                    <th class="px-4 py-2">Month</th>
+                                    <th class="px-4 py-2">Region</th>
+                                    <th class="px-4 py-2">MAU</th>
+                                    <th class="px-4 py-2">Net Revenue</th>
+                                    <th class="px-4 py-2">Trust Status</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-slate-100">
+                                <tr>
+                                    <td class="px-4 py-2.5 font-mono text-slate-900 font-semibold">2026-10</td>
+                                    <td class="px-4 py-2.5">North America</td>
+                                    <td class="px-4 py-2.5 font-semibold">89,200</td>
+                                    <td class="px-4 py-2.5 font-mono">$1,150,000</td>
+                                    <td class="px-4 py-2.5"><span
+                                            class="px-2 py-0.5 rounded text-[10px] bg-emerald-50 text-emerald-700 border border-emerald-200">✓
+                                            Verified</span></td>
+                                </tr>
+                                <tr>
+                                    <td class="px-4 py-2.5 font-mono text-slate-900 font-semibold">2026-10</td>
+                                    <td class="px-4 py-2.5">EMEA</td>
+                                    <td class="px-4 py-2.5 font-semibold">53,300</td>
+                                    <td class="px-4 py-2.5 font-mono">$690,250</td>
+                                    <td class="px-4 py-2.5"><span
+                                            class="px-2 py-0.5 rounded text-[10px] bg-emerald-50 text-emerald-700 border border-emerald-200">✓
+                                            Verified</span></td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Guided Action Footer -->
+                <div
+                    class="bg-slate-50 border border-slate-200 rounded-xl p-3 sm:p-4 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
+                    <p class="text-slate-600">Ready to share with leadership or build on these results?</p>
+                    <div class="flex items-center gap-2 w-full sm:w-auto">
+                        <button onclick="alert('Exported tabular metric payload to Google Sheets!')"
+                            class="flex-1 sm:flex-none px-3.5 py-2 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 rounded-lg font-semibold shadow-xs transition">Export
+                            to Sheets</button>
+                        <button onclick="alert('Pasted metric summary into Google Chat conversation!')"
+                            class="flex-1 sm:flex-none px-3.5 py-2 bg-[#ff694b] hover:bg-[#e05638] text-white rounded-lg font-semibold shadow-xs transition">Post
+                            to Chat</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===================================================================== -->
+            <!-- WORKFLOW 2: DATA TRUST & FRESHNESS AUDIT (Already integrated)         -->
+            <!-- ===================================================================== -->
+            <div id="view-wf-2" class="workflow-view hidden p-4 sm:p-6 space-y-5">
+                <!-- Resource Sub-Nav for W2 -->
+                <div
+                    class="bg-slate-50 border border-slate-200 rounded-xl p-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <div class="flex items-center gap-1.5 overflow-x-auto">
+                        <span class="text-[11px] font-semibold text-slate-500 uppercase tracking-wide mr-1">Audit
+                            Scope:</span>
+                        <button id="w2-tab-exposure" onclick="setW2Resource('exposure')"
+                            class="px-2.5 py-1 rounded-md font-semibold bg-white text-slate-900 border border-slate-300 shadow-xs">BI
+                            Exposure (Looker)</button>
+                        <button id="w2-tab-metric" onclick="setW2Resource('metric')"
+                            class="px-2.5 py-1 rounded-md text-slate-600 hover:bg-slate-100">Semantic Metric</button>
+                        <button id="w2-tab-query" onclick="setW2Resource('query')"
+                            class="px-2.5 py-1 rounded-md text-slate-600 hover:bg-slate-100">Ad-Hoc SQL Query</button>
+                    </div>
+                    <div class="flex items-center gap-1">
+                        <button onclick="setW2Scenario('healthy')"
+                            class="px-2 py-0.5 rounded text-[11px] bg-emerald-50 text-emerald-800 border border-emerald-300 font-semibold">Healthy</button>
+                        <button onclick="setW2Scenario('caution')"
+                            class="px-2 py-0.5 rounded text-[11px] text-slate-600 hover:text-amber-800">Caution</button>
+                        <button onclick="setW2Scenario('critical')"
+                            class="px-2 py-0.5 rounded text-[11px] text-slate-600 hover:text-rose-800">Degraded</button>
+                    </div>
+                </div>
+
+                <!-- Executive Verdict Card -->
+                <section class="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 shadow-xs space-y-4">
+                    <div
+                        class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-100">
+                        <div>
+                            <div class="flex items-center gap-2 mb-1">
+                                <span id="w2-badge"
+                                    class="px-2 py-0.5 text-[11px] font-semibold tracking-wide uppercase rounded bg-amber-50 text-amber-800 border border-amber-200">Looker
+                                    Exposure</span>
+                                <span id="w2-owner" class="text-xs text-slate-500">Owner: @finance-bi</span>
+                            </div>
+                            <h2 id="w2-title" class="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
+                                Executive Sales & Revenue Dashboard</h2>
+                            <p id="w2-desc" class="text-xs text-slate-500 mt-0.5 font-mono">Resource ID:
+                                looker.sales.exec_summary_v3</p>
+                        </div>
+
+                        <!-- Clickable Verdict Pill -->
+                        <button id="w2-status-pill"
+                            class="flex items-center gap-2.5 px-3.5 py-2 rounded-xl border bg-emerald-50 text-emerald-800 border-emerald-300 shadow-xs">
+                            <span id="w2-status-icon"
+                                class="w-5 h-5 rounded-full bg-emerald-500 text-white flex items-center justify-center text-xs">✓</span>
+                            <div class="text-left">
+                                <span class="block text-[10px] uppercase font-bold tracking-wider text-slate-500">Safe
+                                    to Present?</span>
+                                <span id="w2-status-text" class="block text-sm font-bold">Healthy (Safe)</span>
+                            </div>
+                        </button>
+                    </div>
+
+                    <!-- 3-Checkpoint Card from Screenshot -->
+                    <div id="w2-popover" class="bg-white border-2 border-blue-600 rounded-xl p-4 shadow-md space-y-2.5">
+                        <div class="flex items-center justify-between">
+                            <div class="flex items-center gap-2">
+                                <span id="w2-check-icon-main"
+                                    class="w-5 h-5 rounded-full bg-emerald-500 text-white flex items-center justify-center text-xs font-bold">✓</span>
+                                <h3 id="w2-check-title-main" class="text-sm font-bold text-emerald-700">Healthy</h3>
+                            </div>
+                            <span class="text-xs text-slate-400 font-mono">Verified 42m ago</span>
+                        </div>
+                        <p id="w2-check-sub-main" class="text-xs text-slate-600">Healthy means that this resource
+                            consists of the following:</p>
+
+                        <div class="space-y-2 text-xs">
+                            <div class="flex items-start gap-2.5 p-2 rounded bg-slate-50 border border-slate-100">
+                                <span id="w2-ci-1"
+                                    class="w-4 h-4 rounded-full bg-emerald-500 text-white flex items-center justify-center text-[10px] flex-shrink-0 mt-0.5">✓</span>
+                                <span id="w2-ct-1" class="flex-1 text-slate-800 font-medium">All upstream models built
+                                    successfully</span>
+                                <span class="font-mono text-slate-400 text-[10px]">8/8 built</span>
+                            </div>
+                            <div class="flex items-start gap-2.5 p-2 rounded bg-slate-50 border border-slate-100">
+                                <span id="w2-ci-2"
+                                    class="w-4 h-4 rounded-full bg-emerald-500 text-white flex items-center justify-center text-[10px] flex-shrink-0 mt-0.5">✓</span>
+                                <span id="w2-ct-2" class="flex-1 text-slate-800 font-medium">All upstream models passed
+                                    their tests</span>
+                                <span
+                                    class="font-mono text-emerald-700 text-[10px] bg-emerald-50 px-1.5 py-0.2 rounded border border-emerald-200">24/24
+                                    pass</span>
+                            </div>
+                            <div class="flex items-start gap-2.5 p-2 rounded bg-slate-50 border border-slate-100">
+                                <span id="w2-ci-3"
+                                    class="w-4 h-4 rounded-full bg-emerald-500 text-white flex items-center justify-center text-[10px] flex-shrink-0 mt-0.5">✓</span>
+                                <span id="w2-ct-3" class="flex-1 text-slate-800 font-medium">All upstream sources
+                                    healthy</span>
+                                <span class="font-mono text-slate-500 text-[10px]">&lt; 30m latency</span>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Upstream Lineage with Left-to-Right OR Top-Down Orientation -->
+                <section class="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs">
+                    <div
+                        class="px-4 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between text-xs">
+                        <span class="font-semibold text-slate-800">Upstream Lineage DAG</span>
+                        <div
+                            class="flex items-center gap-1.5 bg-white border border-slate-300 rounded p-0.5 text-[11px]">
+                            <button id="w2-btn-lr" onclick="setW2LineageOrientation('lr')"
+                                class="px-2 py-0.5 rounded bg-slate-100 text-slate-900 font-semibold">⇄
+                                Horizontal</button>
+                            <button id="w2-btn-td" onclick="setW2LineageOrientation('td')"
+                                class="px-2 py-0.5 rounded text-slate-500">⇅ Top-Down</button>
+                        </div>
+                    </div>
+
+                    <div id="w2-canvas-area" class="lineage-canvas p-4 sm:p-5 overflow-x-auto min-h-[190px]">
+                        <div id="w2-lineage-flow"
+                            class="flex flex-row items-center justify-between gap-3 w-full min-w-[580px]">
+                            <div
+                                class="w2-node bg-white border border-slate-300 rounded-lg p-2.5 w-44 shadow-xs relative">
+                                <span
+                                    class="absolute -top-2 left-2 px-1 text-[8px] font-bold uppercase rounded bg-[#dcfce7] text-[#15803d]">RAW</span>
+                                <p class="text-xs font-semibold text-slate-800 mt-0.5">raw_orders</p>
+                                <p class="text-[10px] text-slate-500 font-mono">stripe.charges</p>
+                            </div>
+                            <span class="w2-arrow text-slate-400 font-bold text-xs">→</span>
+                            <div
+                                class="w2-node bg-white border border-slate-300 rounded-lg p-2.5 w-44 shadow-xs relative">
+                                <span
+                                    class="absolute -top-2 left-2 px-1 text-[8px] font-bold uppercase rounded bg-[#f3e8ff] text-[#6b21a8]">RENAME</span>
+                                <p class="text-xs font-semibold text-slate-800 mt-0.5">stg_orders</p>
+                                <p class="text-[10px] text-slate-500 font-mono">order_id 🔑PK</p>
+                            </div>
+                            <span class="w2-arrow text-slate-400 font-bold text-xs">→</span>
+                            <div
+                                class="w2-node bg-white border border-slate-300 rounded-lg p-2.5 w-44 shadow-xs relative">
+                                <span
+                                    class="absolute -top-2 left-2 px-1 text-[8px] font-bold uppercase rounded bg-[#ffedd5] text-[#c2410c]">TRANSFORM</span>
+                                <p class="text-xs font-semibold text-slate-800 mt-0.5">mart_exec_sales</p>
+                                <p class="text-[10px] text-slate-500 font-mono">monthly_rev</p>
+                            </div>
+                            <span class="w2-arrow text-slate-400 font-bold text-xs">→</span>
+                            <div
+                                class="w2-node bg-amber-50 border border-amber-300 rounded-lg p-2.5 w-44 shadow-xs relative">
+                                <span
+                                    class="absolute -top-2 left-2 px-1 text-[8px] font-bold uppercase rounded bg-amber-200 text-amber-900">OUTPUT</span>
+                                <p class="text-xs font-bold text-amber-950 mt-0.5">Presentation Target</p>
+                                <p class="text-[10px] text-emerald-700 font-bold">✓ Ready</p>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+            </div>
+
+            <!-- ===================================================================== -->
+            <!-- WORKFLOW 3: COLUMN LINEAGE (CLL) & IMPACT ANALYSIS                    -->
+            <!-- ===================================================================== -->
+            <div id="view-wf-3" class="workflow-view hidden p-4 sm:p-6 space-y-5">
+                <!-- Header from Screenshot #1 -->
+                <div class="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 shadow-xs space-y-3">
+                    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div>
+                            <div class="flex items-center gap-2 mb-1">
+                                <h2 class="text-lg sm:text-xl font-bold font-mono text-slate-900">COUNT_LIFETIME_ORDERS
+                                </h2>
+                                <span
+                                    class="px-2 py-0.5 text-[10px] font-mono uppercase bg-slate-100 text-slate-700 rounded border border-slate-200">NUMBER</span>
+                                <span
+                                    class="px-2 py-0.5 text-[10px] font-semibold text-purple-700 bg-purple-50 rounded border border-purple-200 flex items-center gap-1">
+                                    <span>⌘ CLL</span>
+                                </span>
+                            </div>
+                            <p class="text-xs text-slate-600">Total number of orders a customer has ever placed.</p>
+                            <div class="flex items-center gap-1.5 mt-2 text-xs">
+                                <span class="text-slate-400 font-semibold text-[11px]">Tags:</span>
+                                <span
+                                    class="px-2 py-0.5 rounded text-[10px] bg-slate-100 text-slate-700 border border-slate-200">events</span>
+                                <span
+                                    class="px-2 py-0.5 rounded text-[10px] bg-slate-100 text-slate-700 border border-slate-200">staging</span>
+                            </div>
+                        </div>
+
+                        <!-- Orientation Switcher for W3 -->
+                        <div class="flex items-center gap-2 self-start sm:self-auto">
+                            <div class="flex items-center bg-slate-100 border border-slate-200 rounded p-0.5 text-xs">
+                                <button id="w3-btn-lr" onclick="setW3LineageOrientation('lr')"
+                                    class="px-2 py-0.5 rounded bg-white text-slate-900 font-semibold shadow-xs">⇄
+                                    Left-to-Right</button>
+                                <button id="w3-btn-td" onclick="setW3LineageOrientation('td')"
+                                    class="px-2 py-0.5 rounded text-slate-600">⇅ Top-Down</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Info banner from Screenshot #1 -->
+                    <div
+                        class="bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-600 flex items-center justify-between">
+                        <span class="flex items-center gap-2">
+                            <span
+                                class="w-4 h-4 rounded-full bg-slate-200 text-slate-600 flex items-center justify-center text-[10px] font-bold">i</span>
+                            <span>Column lineage may be missing columns</span>
+                        </span>
+                        <span class="text-[11px] text-slate-400">Fusion Engine v2.1</span>
+                    </div>
+                </div>
+
+                <!-- Dotted Canvas with Exact Node Pills from Screenshot #1 -->
+                <section class="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs">
+                    <div id="w3-canvas-area" class="lineage-canvas p-4 sm:p-6 overflow-x-auto min-h-[220px]">
+                        <div id="w3-lineage-flow"
+                            class="flex flex-row items-center justify-between gap-3 w-full min-w-[640px]">
+
+                            <!-- Node 1: ecom.raw_orders (RAW) -->
+                            <div
+                                class="w3-node bg-white border border-slate-300 rounded-lg p-3 w-48 shadow-xs relative">
+                                <span
+                                    class="absolute -top-2.5 left-2 px-1.5 py-0.2 text-[9px] font-bold uppercase rounded bg-[#dcfce7] text-[#15803d] border border-emerald-200">RAW</span>
+                                <div
+                                    class="flex items-center gap-2 text-xs font-mono font-semibold text-slate-800 mb-1 mt-1">
+                                    <span
+                                        class="px-1 text-[9px] bg-slate-100 border border-slate-200 rounded text-slate-500">COL</span>
+                                    <span>ID</span>
+                                </div>
+                                <div class="text-[10px] text-slate-500 truncate">ecom.raw_orders</div>
+                                <div class="mt-1.5"><span
+                                        class="text-[9px] font-bold px-1.5 py-0.2 rounded bg-[#ccfbf1] text-[#0f766e]">SOURCE</span>
+                                </div>
+                            </div>
+
+                            <!-- Connecting Arrow 1 -->
+                            <span class="w3-arrow text-slate-400 font-bold text-sm px-1">→</span>
+
+                            <!-- Node 2: stg_orders (RENAME) -->
+                            <div
+                                class="w3-node bg-white border border-slate-300 rounded-lg p-3 w-48 shadow-xs relative">
+                                <span
+                                    class="absolute -top-2.5 left-2 px-1.5 py-0.2 text-[9px] font-bold uppercase rounded bg-[#f3e8ff] text-[#6b21a8] border border-purple-200">RENAME</span>
+                                <div
+                                    class="flex items-center gap-1.5 text-xs font-mono font-semibold text-slate-800 mb-1 mt-1">
+                                    <span
+                                        class="px-1 text-[9px] bg-slate-100 border border-slate-200 rounded text-slate-500">COL</span>
+                                    <span>ORDER_ID</span>
+                                    <span class="text-[9px] text-amber-600">🔑PK</span>
+                                </div>
+                                <div class="text-[10px] text-slate-500 font-mono truncate">RENAMED.ORDER_ID</div>
+                                <div class="mt-1.5 flex items-center justify-between">
+                                    <span class="text-xs text-slate-700 font-medium truncate">stg_orders</span>
+                                    <span
+                                        class="text-[9px] font-bold px-1.5 py-0.2 rounded bg-[#dbeafe] text-[#1d4ed8]">MODEL</span>
+                                </div>
+                            </div>
+
+                            <!-- Connecting Arrow 2 -->
+                            <span class="w3-arrow text-slate-400 font-bold text-sm px-1">→</span>
+
+                            <!-- Node 3: orders (PASSTHROUGH) -->
+                            <div
+                                class="w3-node bg-white border border-slate-300 rounded-lg p-3 w-48 shadow-xs relative">
+                                <span
+                                    class="absolute -top-2.5 left-2 px-1.5 py-0.2 text-[9px] font-bold uppercase rounded bg-[#e0f2fe] text-[#0369a1] border border-sky-200">PASSTHROUGH</span>
+                                <div
+                                    class="flex items-center gap-1.5 text-xs font-mono font-semibold text-slate-800 mb-1 mt-1">
+                                    <span
+                                        class="px-1 text-[9px] bg-slate-100 border border-slate-200 rounded text-slate-500">COL</span>
+                                    <span>ORDER_ID</span>
+                                    <span class="text-[9px] text-amber-600">🔑PK</span>
+                                </div>
+                                <div class="text-[10px] text-slate-500 font-mono truncate">orders</div>
+                                <div class="mt-1.5 flex items-center justify-between">
+                                    <span class="text-xs text-slate-700 font-medium truncate">orders</span>
+                                    <span
+                                        class="text-[9px] font-bold px-1.5 py-0.2 rounded bg-[#dbeafe] text-[#1d4ed8]">MODEL</span>
+                                </div>
+                            </div>
+
+                            <!-- Connecting Arrow 3 -->
+                            <span class="w3-arrow text-slate-400 font-bold text-sm px-1">→</span>
+
+                            <!-- Node 4: customers (TRANSFORMATION) -->
+                            <div
+                                class="w3-node bg-white border-2 border-orange-300 rounded-lg p-3 w-56 shadow-xs relative ring-2 ring-orange-100">
+                                <span
+                                    class="absolute -top-2.5 left-2 px-1.5 py-0.2 text-[9px] font-bold uppercase rounded bg-[#ffedd5] text-[#c2410c] border border-orange-200">TRANSFORMATION</span>
+                                <div
+                                    class="flex items-center gap-1 text-xs font-mono font-bold text-slate-900 mb-1 mt-1">
+                                    <span
+                                        class="px-1 text-[9px] bg-slate-100 border border-slate-200 rounded text-slate-500">COL</span>
+                                    <span class="truncate">COUNT_LIFETIME_ORDERS</span>
+                                </div>
+                                <div class="text-[9px] text-slate-600 font-mono bg-slate-50 p-1 rounded truncate">
+                                    COALESCE(COUNT(DISTINCT...))</div>
+                                <div class="mt-1.5 flex items-center justify-between">
+                                    <span class="text-xs text-slate-800 font-semibold truncate">customers</span>
+                                    <span
+                                        class="text-[9px] font-bold px-1.5 py-0.2 rounded bg-[#dbeafe] text-[#1d4ed8]">MODEL</span>
+                                </div>
+                            </div>
+
+                        </div>
+                    </div>
+
+                    <!-- Bottom Legend Bar from Screenshot #1 -->
+                    <div
+                        class="bg-slate-50 px-4 py-2 border-t border-slate-200 flex flex-wrap items-center justify-between text-[11px] text-slate-500 gap-2">
+                        <div class="flex items-center gap-2">
+                            <span class="font-semibold text-slate-700">Lenses:</span>
+                            <span class="inline-flex items-center gap-1"><span
+                                    class="w-2.5 h-2.5 rounded-sm bg-[#dcfce7] border border-emerald-300"></span>
+                                Raw</span>
+                            <span class="inline-flex items-center gap-1"><span
+                                    class="w-2.5 h-2.5 rounded-sm bg-[#e0f2fe] border border-sky-300"></span>
+                                Passthrough</span>
+                            <span class="inline-flex items-center gap-1"><span
+                                    class="w-2.5 h-2.5 rounded-sm bg-[#ffedd5] border border-orange-300"></span>
+                                Transformation</span>
+                            <span class="inline-flex items-center gap-1"><span
+                                    class="w-2.5 h-2.5 rounded-sm bg-[#f3e8ff] border border-purple-300"></span>
+                                Rename</span>
+                        </div>
+                        <button onclick="alert('Generated YAML schema definition!')"
+                            class="text-xs font-semibold text-[#ff694b] hover:underline">Generate Model YAML →</button>
+                    </div>
+                </section>
+            </div>
+
+            <!-- ===================================================================== -->
+            <!-- WORKFLOW 4: DATAOPS PIPELINE INCIDENT & SAFE RETRY                    -->
+            <!-- ===================================================================== -->
+            <div id="view-wf-4" class="workflow-view hidden p-4 sm:p-6 space-y-5">
+                <!-- Incident Alert Banner -->
+                <div
+                    class="bg-rose-50 border border-rose-200 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div class="flex items-start gap-3">
+                        <div
+                            class="w-8 h-8 rounded-full bg-rose-600 text-white flex items-center justify-center font-bold text-sm flex-shrink-0 mt-0.5">
+                            ✕</div>
+                        <div>
+                            <div class="flex items-center gap-2">
+                                <span
+                                    class="px-2 py-0.5 text-[10px] font-bold uppercase rounded bg-rose-100 text-rose-800">Job
+                                    Run Error</span>
+                                <span class="text-xs font-mono text-slate-500">Run ID: #98124</span>
+                            </div>
+                            <h2 class="text-base sm:text-lg font-bold text-slate-900 mt-0.5">Production Nightly Build
+                                Failed (03:14 AM)</h2>
+                            <p class="text-xs text-rose-700 mt-0.5">Failure isolated to Step 3 (dbt run). 142 of 145
+                                models completed successfully.</p>
+                        </div>
+                    </div>
+                    <span class="text-xs font-mono text-slate-500 self-start sm:self-auto">Snowflake US-East</span>
+                </div>
+
+                <!-- Failure Diagnosis Card (Extracted via get_job_run_error) -->
+                <section class="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 shadow-xs space-y-3">
+                    <div class="flex items-center justify-between border-b border-slate-100 pb-2.5">
+                        <h3 class="text-xs sm:text-sm font-bold text-slate-900">Extracted Error & Root Cause Analysis
+                        </h3>
+                        <span
+                            class="text-[11px] font-mono text-slate-400 bg-slate-100 px-2 py-0.5 rounded">model.sales.fct_daily_usage</span>
+                    </div>
+
+                    <div class="bg-slate-900 text-rose-300 p-3 rounded-lg font-mono text-xs overflow-x-auto">
+                        <p class="text-slate-400 mb-1">-- Runtime Error extracted via dbt-mcp (get_job_run_error):</p>
+                        <p>Database Error in model fct_daily_usage (models/marts/fct_daily_usage.sql):</p>
+                        <p class="text-rose-400 font-bold">SQL compilation error: Lock wait timeout exceeded (300
+                            seconds) while awaiting table lock on raw_events.</p>
+                    </div>
+
+                    <!-- Safe Retry Assessment Matrix -->
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 text-xs">
+                        <div class="bg-emerald-50 border border-emerald-200 rounded-lg p-2.5 text-center">
+                            <span class="block text-emerald-800 font-bold text-base">142</span>
+                            <span class="text-emerald-700 text-[11px]">Models Succeeded</span>
+                        </div>
+                        <div class="bg-rose-50 border border-rose-200 rounded-lg p-2.5 text-center">
+                            <span class="block text-rose-800 font-bold text-base">1</span>
+                            <span class="text-rose-700 text-[11px]">Model Failed (Lock Timeout)</span>
+                        </div>
+                        <div class="bg-amber-50 border border-amber-200 rounded-lg p-2.5 text-center">
+                            <span class="block text-amber-800 font-bold text-base">2</span>
+                            <span class="text-amber-700 text-[11px]">Downstream Skipped</span>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- One-Click Safe Retry Action Bar -->
+                <div
+                    class="bg-slate-50 border border-slate-200 rounded-xl p-4 flex flex-col sm:flex-row items-center justify-between gap-3">
+                    <div>
+                        <h4 class="text-xs sm:text-sm font-semibold text-slate-900">Safe Target Retry Available</h4>
+                        <p class="text-xs text-slate-500">Only re-executes the 1 failed model and 2 skipped dependencies
+                            without re-building the 142 passed models.</p>
+                    </div>
+                    <button onclick="triggerSafeRetry()" id="btn-retry"
+                        class="w-full sm:w-auto px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold shadow-sm transition flex items-center justify-center gap-2">
+                        <span>⚡ Trigger Targeted Safe Retry (3 Models)</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- ===================================================================== -->
+            <!-- WORKFLOW 5: CROSS-PROJECT dbt MESH CONTRACT CATALOG                   -->
+            <!-- ===================================================================== -->
+            <div id="view-wf-5" class="workflow-view hidden p-4 sm:p-6 space-y-5">
+                <!-- Catalog Search & Filter Header -->
+                <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-xs space-y-3">
+                    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div>
+                            <h2 class="text-base sm:text-lg font-bold text-slate-900">Public dbt Mesh Contract Catalog
+                            </h2>
+                            <p class="text-xs text-slate-500">Discover reusable public models and contracts across
+                                enterprise data domains.</p>
+                        </div>
+                        <span
+                            class="px-2 py-0.5 text-[11px] font-mono rounded bg-slate-100 text-slate-700 border border-slate-200 self-start sm:self-auto">Multi-Project
+                            Mesh</span>
+                    </div>
+
+                    <div class="flex flex-col sm:flex-row items-center gap-2 text-xs">
+                        <input type="text" placeholder="Search public contracts (e.g. ARR, customer, contracts)..."
+                            class="w-full sm:flex-1 px-3 py-2 border border-slate-300 rounded-lg text-xs focus:outline-blue-500"
+                            value="customer contract">
+                        <select
+                            class="w-full sm:w-auto px-3 py-2 border border-slate-300 rounded-lg text-xs bg-white text-slate-700">
+                            <option>All Domains (Finance, Core, Growth)</option>
+                            <option selected>Domain: Finance Core</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Contracted Model Card -->
+                <div
+                    class="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 shadow-xs space-y-3 hover:border-slate-300 transition">
+                    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <div>
+                            <div class="flex items-center gap-2">
+                                <span
+                                    class="px-2 py-0.5 text-[10px] font-mono uppercase bg-emerald-50 text-emerald-800 border border-emerald-200 rounded font-semibold">Access:
+                                    Public</span>
+                                <span
+                                    class="px-2 py-0.5 text-[10px] font-mono uppercase bg-blue-50 text-blue-800 border border-blue-200 rounded font-semibold">Contract:
+                                    Enforced</span>
+                                <span class="text-xs text-slate-500">Version: <strong>v1</strong></span>
+                            </div>
+                            <h3 class="text-base font-bold font-mono text-slate-900 mt-1">
+                                finance_core.dim_customer_contracts</h3>
+                        </div>
+                        <span class="text-xs text-emerald-600 font-semibold flex items-center gap-1">✓ 99.8% SLA
+                            Adherence</span>
+                    </div>
+
+                    <p class="text-xs text-slate-600">Authoritative finance contract dataset containing verified ARR,
+                        subscription tiers, renewal dates, and billing IDs.</p>
+
+                    <!-- Columns Spec Pills -->
+                    <div class="flex flex-wrap items-center gap-1.5 text-[11px] font-mono text-slate-600">
+                        <span class="bg-slate-100 px-2 py-0.5 rounded border border-slate-200">customer_id (text)
+                            🔑</span>
+                        <span class="bg-slate-100 px-2 py-0.5 rounded border border-slate-200">current_contract_tier
+                            (text)</span>
+                        <span class="bg-slate-100 px-2 py-0.5 rounded border border-slate-200">annual_recurring_revenue
+                            (numeric)</span>
+                        <span class="bg-slate-100 px-2 py-0.5 rounded border border-slate-200">contract_end_date
+                            (date)</span>
+                    </div>
+
+                    <!-- Jinja Reference Snippet -->
+                    <div
+                        class="bg-slate-900 text-slate-200 p-2.5 rounded-lg text-xs font-mono flex items-center justify-between">
+                        <span class="text-slate-300 truncate mr-2">{{ ref('finance_core', 'dim_customer_contracts', v=1)
+                            }}</span>
+                        <button onclick="copyJinjaRef()"
+                            class="text-xs bg-slate-800 hover:bg-slate-700 px-2.5 py-1 rounded text-white font-sans flex-shrink-0 transition">Copy
+                            Ref</button>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </main>
+
+    <!-- Interactive JavaScript Controller -->
+    <script>
+        let currentWf = 1;
+
+        function switchWorkflow(id) {
+            currentWf = id;
+
+            // Update top tabs
+            for (let i = 1; i <= 5; i++) {
+                const tab = document.getElementById(`wf-tab-${i}`);
+                const view = document.getElementById(`view-wf-${i}`);
+                if (i === id) {
+                    tab.className = 'px-3 py-1.5 rounded-lg font-semibold bg-slate-900 text-white shadow-xs whitespace-nowrap flex items-center gap-1.5 transition';
+                    view.classList.remove('hidden');
+                } else {
+                    tab.className = 'px-3 py-1.5 rounded-lg font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 whitespace-nowrap flex items-center gap-1.5 transition';
+                    view.classList.add('hidden');
+                }
+            }
+
+            // Update surface title
+            const titles = {
+                1: 'dbt-mcp :: Governed Metric Explorer',
+                2: 'dbt-mcp :: Data Health & Freshness Audit',
+                3: 'dbt-mcp :: Column Lineage & Impact Analysis',
+                4: 'dbt-mcp :: Pipeline Incident & Safe Retry',
+                5: 'dbt-mcp :: Public dbt Mesh Catalog'
+            };
+            document.getElementById('canvas-tab-title').textContent = titles[id];
+        }
+
+        function setDevice(device) {
+            const container = document.getElementById('device-container');
+            const bDesktop = document.getElementById('btn-desktop');
+            const bTablet = document.getElementById('btn-tablet');
+            const bMobile = document.getElementById('btn-mobile');
+
+            [bDesktop, bTablet, bMobile].forEach(b => b.className = 'px-2.5 py-1 rounded-md text-slate-600 hover:text-slate-900 transition');
+
+            if (device === 'desktop') {
+                container.style.maxWidth = '100%';
+                bDesktop.className = 'px-2.5 py-1 rounded-md bg-white text-slate-900 shadow-xs transition font-medium';
+                setW2LineageOrientation('lr');
+                setW3LineageOrientation('lr');
+            } else if (device === 'tablet') {
+                container.style.maxWidth = '768px';
+                bTablet.className = 'px-2.5 py-1 rounded-md bg-white text-slate-900 shadow-xs transition font-medium';
+                setW2LineageOrientation('lr');
+                setW3LineageOrientation('lr');
+            } else if (device === 'mobile') {
+                container.style.maxWidth = '390px';
+                bMobile.className = 'px-2.5 py-1 rounded-md bg-white text-slate-900 shadow-xs transition font-medium';
+                // Auto-switch lineage to Top-Down on tiny mobile screens!
+                setW2LineageOrientation('td');
+                setW3LineageOrientation('td');
+            }
+        }
+
+        // Workflow 1 Helpers
+        function toggleCompiledSql() {
+            const p = document.getElementById('compiled-sql-panel');
+            p.classList.toggle('hidden');
+        }
+
+        // Workflow 2 Helpers
+        function setW2Resource(type) {
+            ['exposure', 'metric', 'query'].forEach(t => {
+                const b = document.getElementById(`w2-tab-${t}`);
+                if (t === type) {
+                    b.className = 'px-2.5 py-1 rounded-md font-semibold bg-white text-slate-900 border border-slate-300 shadow-xs';
+                } else {
+                    b.className = 'px-2.5 py-1 rounded-md text-slate-600 hover:bg-slate-100';
+                }
+            });
+            const names = {
+                exposure: 'Executive Sales & Revenue Dashboard (Looker)',
+                metric: 'Monthly Active Users (dbt Semantic Layer)',
+                query: 'mart_exec_sales.sql (Warehouse Materialization)'
+            };
+            document.getElementById('w2-title').textContent = names[type];
+        }
+
+        function setW2Scenario(sc) {
+            const pill = document.getElementById('w2-status-pill');
+            const icon = document.getElementById('w2-status-icon');
+            const text = document.getElementById('w2-status-text');
+            const popover = document.getElementById('w2-popover');
+            const cIcon = document.getElementById('w2-check-icon-main');
+            const cTitle = document.getElementById('w2-check-title-main');
+
+            if (sc === 'healthy') {
+                pill.className = 'flex items-center gap-2.5 px-3.5 py-2 rounded-xl border bg-emerald-50 text-emerald-800 border-emerald-300 shadow-xs';
+                icon.className = 'w-5 h-5 rounded-full bg-emerald-500 text-white flex items-center justify-center text-xs';
+                icon.textContent = '✓';
+                text.textContent = 'Healthy (Safe)';
+                popover.className = 'bg-white border-2 border-blue-600 rounded-xl p-4 shadow-md space-y-2.5';
+                cIcon.className = 'w-5 h-5 rounded-full bg-emerald-500 text-white flex items-center justify-center text-xs font-bold';
+                cIcon.textContent = '✓';
+                cTitle.className = 'text-sm font-bold text-emerald-700';
+                cTitle.textContent = 'Healthy';
+            } else if (sc === 'caution') {
+                pill.className = 'flex items-center gap-2.5 px-3.5 py-2 rounded-xl border bg-amber-50 text-amber-800 border-amber-300 shadow-xs';
+                icon.className = 'w-5 h-5 rounded-full bg-amber-500 text-white flex items-center justify-center text-xs';
+                icon.textContent = '⊝';
+                text.textContent = 'Caution (Stale)';
+                popover.className = 'bg-white border-2 border-amber-500 rounded-xl p-4 shadow-md space-y-2.5';
+                cIcon.className = 'w-5 h-5 rounded-full bg-amber-500 text-white flex items-center justify-center text-xs font-bold';
+                cIcon.textContent = '!';
+                cTitle.className = 'text-sm font-bold text-amber-700';
+                cTitle.textContent = 'Caution';
+            } else {
+                pill.className = 'flex items-center gap-2.5 px-3.5 py-2 rounded-xl border bg-rose-50 text-rose-800 border-rose-300 shadow-xs';
+                icon.className = 'w-5 h-5 rounded-full bg-rose-600 text-white flex items-center justify-center text-xs';
+                icon.textContent = '✕';
+                text.textContent = 'Degraded (Error)';
+                popover.className = 'bg-white border-2 border-rose-600 rounded-xl p-4 shadow-md space-y-2.5';
+                cIcon.className = 'w-5 h-5 rounded-full bg-rose-600 text-white flex items-center justify-center text-xs font-bold';
+                cIcon.textContent = '✕';
+                cTitle.className = 'text-sm font-bold text-rose-700';
+                cTitle.textContent = 'Degraded';
+            }
+        }
+
+        function setW2LineageOrientation(orient) {
+            const flow = document.getElementById('w2-lineage-flow');
+            const bLR = document.getElementById('w2-btn-lr');
+            const bTD = document.getElementById('w2-btn-td');
+            const arrows = document.querySelectorAll('.w2-arrow');
+            const nodes = document.querySelectorAll('.w2-node');
+
+            if (orient === 'td') {
+                bTD.className = 'px-2 py-0.5 rounded bg-slate-100 text-slate-900 font-semibold';
+                bLR.className = 'px-2 py-0.5 rounded text-slate-500';
+                flow.className = 'flex flex-col items-center justify-center gap-2 w-full max-w-xs mx-auto min-w-0';
+                arrows.forEach(a => { a.textContent = '↓'; a.className = 'w2-arrow text-slate-400 font-bold text-xs py-0.5'; });
+                nodes.forEach(n => { n.style.width = '100%'; });
+            } else {
+                bLR.className = 'px-2 py-0.5 rounded bg-slate-100 text-slate-900 font-semibold';
+                bTD.className = 'px-2 py-0.5 rounded text-slate-500';
+                flow.className = 'flex flex-row items-center justify-between gap-3 w-full min-w-[580px]';
+                arrows.forEach(a => { a.textContent = '→'; a.className = 'w2-arrow text-slate-400 font-bold text-xs px-1'; });
+                nodes.forEach(n => { n.style.width = ''; });
+            }
+        }
+
+        // Workflow 3 (Column Lineage) Orientation Helpers
+        function setW3LineageOrientation(orient) {
+            const flow = document.getElementById('w3-lineage-flow');
+            const bLR = document.getElementById('w3-btn-lr');
+            const bTD = document.getElementById('w3-btn-td');
+            const arrows = document.querySelectorAll('.w3-arrow');
+            const nodes = document.querySelectorAll('.w3-node');
+
+            if (orient === 'td') {
+                bTD.className = 'px-2 py-0.5 rounded bg-white text-slate-900 font-semibold shadow-xs';
+                bLR.className = 'px-2 py-0.5 rounded text-slate-600';
+                flow.className = 'flex flex-col items-center justify-center gap-2 w-full max-w-sm mx-auto min-w-0';
+                arrows.forEach(a => { a.textContent = '↓'; a.className = 'w3-arrow text-slate-400 font-bold text-xs py-0.5'; });
+                nodes.forEach(n => { n.style.width = '100%'; });
+            } else {
+                bLR.className = 'px-2 py-0.5 rounded bg-white text-slate-900 font-semibold shadow-xs';
+                bTD.className = 'px-2 py-0.5 rounded text-slate-600';
+                flow.className = 'flex flex-row items-center justify-between gap-3 w-full min-w-[640px]';
+                arrows.forEach(a => { a.textContent = '→'; a.className = 'w3-arrow text-slate-400 font-bold text-sm px-1'; });
+                nodes.forEach(n => { n.style.width = ''; });
+            }
+        }
+
+        // Workflow 4 Helper
+        function triggerSafeRetry() {
+            const btn = document.getElementById('btn-retry');
+            btn.innerHTML = '<span>⏳ Submitting Retry to dbt Cloud...</span>';
+            setTimeout(() => {
+                alert('dbt-mcp triggered retry_job_run(#98124)! New Job Run #98125 is queued for the 3 remaining models.');
+                btn.innerHTML = '<span>✓ Retry Run #98125 Queued</span>';
+                btn.className = 'w-full sm:w-auto px-4 py-2.5 bg-slate-700 text-white rounded-lg text-xs font-bold';
+            }, 700);
+        }
+
+        // Workflow 5 Helper
+        function copyJinjaRef() {
+            const snippet = "{{ ref('finance_core', 'dim_customer_contracts', v=1) }}";
+            navigator.clipboard.writeText(snippet).then(() => {
+                alert('Jinja ref copied to clipboard:\n' + snippet);
+            }).catch(() => {
+                alert(snippet);
+            });
+        }
+    </script>
+</body>
+
+</html>
