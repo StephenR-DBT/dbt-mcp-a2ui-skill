@@ -52,18 +52,18 @@ sequenceDiagram
 Designed for analytics engineers and on-call data owners who need to see what broke and fix it immediately:
 - **Workspace Health KPI Strip:** Instant counts for Failed Runs, Source Freshness Alerts, Marts/Models, and Governed Metrics (each 1-click filterable).
 - **"Needs Review & Action" Queue:** Prioritizes failed runs (with root-cause error snippets), active builds, and stale/errored upstream sources.
-- **`0ms` Run Explorer:** Filter up to 40 prefetched runs by status (`All`, `Failed`, `Active`, `Succeeded`, `Cancelled`), by dbt Job, or by live keyword search (run ID, job name, branch, trigger cause).
+- **`0ms` Run Explorer + Inline Run Refresh:** Filter up to 40 prefetched runs by status (`All`, `Failed`, `Active`, `Succeeded`, `Cancelled`), by dbt Job, or by live keyword search, and click **Refresh** directly next to **Recent Job Runs** (`dbt_refresh_runs`) to update run statuses and inspect finished run results/logs immediately.
 - **Guarded Remediations:**
-  - **⚡ Safe Retry (`retry_job_run`):** Resume a failed run from the point of failure.
-  - **▶ Selective Rebuild (`trigger_job_run`):** Trigger a targeted `dbt build --select +model+` or launch preset runs (`state:modified+`, `dbt test`, `dbt source freshness`).
-  - **⏹ Cancel Run (`cancel_job_run`):** Stop an active or queued build.
+  - **Safe Retry (`retry_job_run`):** Resume a failed run from the point of failure.
+  - **Selective Rebuild (`trigger_job_run`):** Trigger a targeted `dbt build --select +model+` or launch preset runs (`state:modified+`, `dbt test`, `dbt source freshness`).
+  - **Cancel Run (`cancel_job_run`):** Stop an active or queued build.
 - **On-Demand Deep Dive:** Load step-by-step execution timings, build artifacts (`list_job_run_artifacts`), and contextual dbt Docs troubleshooting (`search_product_docs`).
 
 ### 2. Models, Health, Sources & Lineage — *Catalog Discovery & Impact Analysis*
 Designed for auditing data freshness, understanding upstream/downstream blast radius, and inspecting model logic:
-- **Unified `0ms` Resource Explorer:** Search and chip-filter across **Marts**, **All Models**, **Raw Sources** (with freshness badges), **BI Exposures**, and **Needs Attention** alerts with Master-Detail navigation (`← All Resources`).
-- **Direct Actions from Any Model:** 1-click **▶ Rebuild `+model+`** or **🧪 Query in SQL Runner**.
-- **On-Demand Model Deep Dive:** Fetch interactive **Upstream → Focus → Downstream Lineage Graphs** (Left-to-Right & Top-Down mobile toggle), column schemas, Compiled SQL vs. Raw Jinja, model health (`get_model_health`), historical execution duration trends (`get_model_performance`), and AI semantic discovery (`get_related_models`).
+- **Unified `0ms` Resource Explorer:** Search and chip-filter across **Marts**, **All Models**, **Raw Sources** (with freshness badges), **BI Exposures**, and **Needs Attention** alerts with Master-Detail navigation (`All Resources`).
+- **Direct Actions from Any Model:** 1-click **Rebuild `+model+`** or **Query in SQL Runner**.
+- **On-Demand Model Deep Dive:** Fetch interactive **Upstream -> Focus -> Downstream Lineage Graphs** (Left-to-Right & Top-Down mobile toggle), column schemas, Compiled SQL vs. Raw Jinja, model health (`get_model_health`), historical execution duration trends (`get_model_performance`), and AI semantic discovery (`get_related_models`).
 
 ### 3. Semantic Metric Studio — *Governed MetricFlow Self-Service*
 Designed for analysts and business stakeholders exploring governed KPIs from the dbt Semantic Layer:
@@ -83,10 +83,11 @@ Designed for rapid ad-hoc data validation using governed dbt references rather t
 
 | Phase | Trigger | dbt Cloud MCP Tools Invoked |
 | :--- | :--- | :--- |
-| **Upfront Prefetch (`open`)** | Initial workbench open or explicit `↻ Sync` / project switch | **Wave 1 (Parallel):** `list_projects`, `list_jobs`, `list_jobs_runs`, `get_mart_models`, `get_all_models`, `get_all_sources`, `get_exposures`, `list_metrics`, `list_saved_queries`, `get_all_macros`<br>**Wave 2 (Parallel):** `get_job_run_details` + `get_job_run_error` (failed & latest runs), `get_lineage` + `get_node_details` + `get_model_health` (primary mart), `get_dimensions` + `get_entities` + `query_metrics` + `get_metrics_compiled_sql` (primary metric) |
+| **Upfront Prefetch (`open`)** | Initial workbench open or explicit `Sync` / project switch | **Wave 1 (Parallel):** `list_projects`, `list_jobs`, `list_jobs_runs`, `get_mart_models`, `get_all_models`, `get_all_sources`, `get_exposures`, `list_metrics`, `list_saved_queries`, `get_all_macros`<br>**Wave 2 (Parallel):** `get_job_run_details` + `get_job_run_error` (failed & latest runs), `get_lineage` + `get_node_details` + `get_model_health` (primary mart), `get_dimensions` + `get_entities` + `query_metrics` + `get_metrics_compiled_sql` (primary metric) |
 | **Client-Side Exploration (`0ms`)** | Tab switching, run/model/source/metric/macro search & filtering, chart/table/SQL toggle, staging modals | **None (`0` MCP calls — instant in-browser state)** |
-| **On-Demand Deep Dives** | Clicking `🔍 Deep-Dive`, `🔬 Run Deep Dive`, `🧠 AI Search`, `▶ Run Metric Slice`, or `✨ Generate SQL` | `list_job_run_artifacts`, `search_product_docs`, `get_lineage`, `get_node_details`, `get_model_health`, `get_model_performance`, `get_related_models`, `query_metrics`, `get_metrics_compiled_sql`, `text_to_sql` |
-| **Confirmed Executions (`decide --execute`)** | Clicking `✓ Confirm & Execute` in the Confirmation Modal (or explicit chat confirmation) | `retry_job_run`, `trigger_job_run`, `cancel_job_run`, `execute_sql` |
+| **Targeted Run Refresh (`incident --refresh-runs`)** | Clicking `Refresh` next to **Recent Job Runs** | `list_jobs_runs` + `get_job_run_details` + `get_job_run_error` (updates run statuses & selected run result/logs in ~1s) |
+| **On-Demand Deep Dives** | Clicking `Deep-Dive`, `Run Deep Dive`, `AI Search`, `Run Metric Slice`, or `Generate SQL` | `list_job_run_artifacts`, `search_product_docs`, `get_lineage`, `get_node_details`, `get_model_health`, `get_model_performance`, `get_related_models`, `query_metrics`, `get_metrics_compiled_sql`, `text_to_sql` |
+| **Confirmed Executions (`decide --execute`)** | Clicking `Confirm & Execute` in the Confirmation Modal (or explicit chat confirmation) | `retry_job_run`, `trigger_job_run`, `cancel_job_run`, `execute_sql` |
 
 ---
 

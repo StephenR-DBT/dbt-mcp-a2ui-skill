@@ -1144,6 +1144,98 @@ def hydrate_workspace_bundle(
     }
 
 
+def refresh_recent_runs(
+    gw: DbtMcpGateway,
+    state: dict[str, Any],
+    *,
+    project_id: int,
+    focus_run_id: int | None = None,
+    status_filter: str = "",
+) -> None:
+    """Fast targeted refresh of recent job runs + diagnostics for failed & selected runs."""
+    hydrate_workspace_bundle(gw, state, project_id=project_id, force_refresh=False)
+    raw_runs, _, _ = gw.call_soft("list_jobs_runs", {"order_by": "-created_at", "limit": 40})
+    jobs = state.get("jobs") or []
+    job_name_by_id = {str(j["id"]): str(j["name"]) for j in jobs if isinstance(j, dict) and "id" in j}
+    norm_runs: list[dict[str, Any]] = []
+    for r in extract_items(raw_runs, ("runs", "data", "items"))[:40]:
+        rid_v = r.get("id") or r.get("run_id")
+        try:
+            rid_i = int(rid_v)
+        except (TypeError, ValueError):
+            continue
+        r_jid = str(r.get("job_definition_id") or r.get("job_id") or "")
+        st_human = str(r.get("status_humanized") or r.get("status") or "unknown").lower()
+        norm_runs.append({
+            "id": str(rid_i),
+            "job_id": r_jid,
+            "job_name": job_name_by_id.get(r_jid) or str((r.get("job") or {}).get("name") or f"Job {r_jid or 'Run'}"),
+            "status": st_human,
+            "status_bucket": _normalize_run_status_bucket(st_human),
+            "duration": str(r.get("duration_humanized") or r.get("duration") or ""),
+            "created_at": str(r.get("created_at") or r.get("finished_at") or "")[:19],
+            "git_branch": str(r.get("git_branch") or ""),
+            "trigger_cause": mask_pii(
+                str(r.get("trigger", {}).get("cause") if isinstance(r.get("trigger"), dict) else (r.get("cause") or ""))[:90]
+            ),
+        })
+    if norm_runs:
+        state["runs"] = norm_runs
+
+    runs_now = state.get("runs") or []
+    target_rid_str = str(focus_run_id) if focus_run_id else str(state.get("selected_run_id") or "")
+    target_run = next((r for r in runs_now if str(r.get("id")) == target_rid_str), None)
+    if not target_run and runs_now:
+        target_run = runs_now[0]
+        target_rid_str = str(target_run["id"])
+
+    inspect_ids: list[str] = []
+    if target_rid_str:
+        inspect_ids.append(target_rid_str)
+    for r in runs_now:
+        if r.get("status_bucket") == "error" and str(r["id"]) not in inspect_ids and len(inspect_ids) < 3:
+            inspect_ids.append(str(r["id"]))
+    if runs_now and str(runs_now[0]["id"]) not in inspect_ids:
+        inspect_ids.append(str(runs_now[0]["id"]))
+
+    diag_calls: dict[str, tuple[str, dict[str, Any]]] = {}
+    for rid_s in inspect_ids:
+        rid_num = int(rid_s)
+        diag_calls[f"rd_{rid_s}"] = ("get_job_run_details", {"run_id": rid_num})
+        diag_calls[f"re_{rid_s}"] = ("get_job_run_error", {"run_id": rid_num, "include_warnings": True})
+    if diag_calls:
+        w2 = gw.call_parallel(diag_calls)
+        diags = state.setdefault("run_diagnostics", {})
+        for rid_s in inspect_ids:
+            raw_rd, txt_rd, _ = w2[f"rd_{rid_s}"]
+            raw_re, txt_re, _ = w2[f"re_{rid_s}"]
+            prev_d = diags.get(rid_s) or {}
+            new_d = _extract_run_diagnostic(raw_rd, txt_rd, raw_re, txt_re, rid_s)
+            if prev_d.get("artifacts"):
+                new_d["artifacts"] = prev_d["artifacts"]
+            if prev_d.get("docs_hits"):
+                new_d["docs_hits"] = prev_d["docs_hits"]
+            diags[rid_s] = new_d
+
+    if target_rid_str:
+        state["selected_run_id"] = target_rid_str
+
+    st_clean = status_filter.strip().lower()
+    if st_clean in ("error", "running", "success", "cancelled"):
+        if target_run and target_run.get("status_bucket") != st_clean:
+            state["initial_run_filter"] = ""
+        else:
+            state["initial_run_filter"] = st_clean
+
+    state["last_synced"] = _now_utc_short()
+    if target_run:
+        state["banner"] = {
+            "kind": "crit" if target_run["status_bucket"] == "error" else ("warn" if target_run["status_bucket"] == "running" else "ok"),
+            "title": f"Recent Job Runs Updated - Run #{target_run['id']} ({target_run['status'].upper()})",
+            "detail": f"{target_run['job_name']} - Synced at {state['last_synced']}",
+        }
+
+
 def deep_dive_run(
     gw: DbtMcpGateway,
     state: dict[str, Any],
@@ -1463,7 +1555,9 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
     .brand-title {{ font-weight: 800; font-size: 13.5px; letter-spacing: 0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
     .proj-select {{ background: rgba(255,255,255,0.12); color: #fff; border: 1px solid rgba(255,255,255,0.25); border-radius: 8px; padding: 4px 8px; font-size: 12px; font-weight: 600; max-width: 185px; width: auto; }}
     .proj-select option {{ color: #0f172a; background: #fff; }}
-    .back-nav-btn {{ padding: 5px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.28); background: rgba(255,255,255,0.12); color: #fff; font-family: inherit; font-size: 12px; font-weight: 700; cursor: pointer; white-space: nowrap; }}
+    .back-nav-btn {{ padding: 5px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.28); background: rgba(255,255,255,0.12); color: #fff; font-family: inherit; font-size: 12px; font-weight: 700; cursor: pointer; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; }}
+    .back-nav-btn:hover {{ background: rgba(255,255,255,0.2); }}
+    .btn svg, .back-nav-btn svg {{ flex-shrink: 0; display: block; }}
     .nav-tabs {{ display: flex; gap: 5px; overflow-x: auto; scrollbar-width: none; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 5px; }}
     .nav-tabs::-webkit-scrollbar {{ display: none; }}
     .nav-tab {{ border: none; background: transparent; color: var(--secondary); font-family: inherit; font-size: 12.5px; font-weight: 700; padding: 7px 12px; border-radius: 8px; cursor: pointer; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; }}
@@ -1552,7 +1646,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
     <div style="display:flex;align-items:center;gap:8px;">
       <span id="syncMeta" class="sync-meta"></span>
       <div id="projHost"></div>
-      <button type="button" id="syncBtn" class="back-nav-btn" title="Re-sync workspace metadata from dbt Cloud">↻ Sync</button>
+      <button type="button" id="syncBtn" class="back-nav-btn" title="Re-sync workspace metadata from dbt Cloud">Sync</button>
     </div>
   </header>
   <main id="appRoot" class="shell"></main>
@@ -1647,29 +1741,56 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
       return svg;
     }}
 
-    function makeRefreshSvg() {{
+    const ICON_PATHS = {{
+      refresh: ["M21 12a9 9 0 0 0-15.4-6.4L3 8", "M3 3v5h5", "M3 12a9 9 0 0 0 15.4 6.4L21 16", "M16 16h5v5"],
+      retry: ["M3 12a9 9 0 1 0 3-6.7L3 8", "M3 3v5h5"],
+      play: ["M6 4l14 8-14 8V4z"],
+      stop: ["M6 6h12v12H6z"],
+      search: ["M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z", "M21 21l-4.35-4.35"],
+      layers: ["M12 2L2 7l10 5 10-5-10-5z", "M2 17l10 5 10-5", "M2 12l10 5 10-5"],
+      activity: ["M22 12h-4l-3 9L9 3l-3 9H2"],
+      terminal: ["M4 17l6-6-6-6", "M12 19h8"],
+      sparkle: ["M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"],
+      "arrow-left": ["M19 12H5", "M12 19l-7-7 7-7"],
+      "arrow-right": ["M5 12h14", "M12 5l7 7-7 7"],
+      "arrow-down": ["M12 5v14", "M19 12l-7 7-7-7"],
+      check: ["M20 6L9 17l-5-5"],
+      close: ["M18 6L6 18", "M6 6l12 12"],
+      columns: ["M3 3h7v18H3z", "M14 3h7v18h-7z"],
+      rows: ["M3 3h18v7H3z", "M3 14h18v7H3z"]
+    }};
+
+    function makeIcon(name, size, extraClass) {{
       const ns = "http://www.w3.org/2000/svg";
       const svg = document.createElementNS(ns, "svg");
+      const px = String(size || 14);
       svg.setAttribute("viewBox", "0 0 24 24");
-      svg.setAttribute("class", "refresh-svg");
+      svg.setAttribute("width", px);
+      svg.setAttribute("height", px);
+      if (extraClass) svg.setAttribute("class", extraClass);
       svg.setAttribute("fill", "none");
       svg.setAttribute("stroke", "currentColor");
-      svg.setAttribute("stroke-width", "2.3");
+      svg.setAttribute("stroke-width", "2.1");
       svg.setAttribute("stroke-linecap", "round");
       svg.setAttribute("stroke-linejoin", "round");
-      const p1 = document.createElementNS(ns, "path");
-      p1.setAttribute("d", "M21 12a9 9 0 0 0-15.4-6.4L3 8");
-      const p2 = document.createElementNS(ns, "path");
-      p2.setAttribute("d", "M3 3v5h5");
-      const p3 = document.createElementNS(ns, "path");
-      p3.setAttribute("d", "M3 12a9 9 0 0 0 15.4 6.4L21 16");
-      const p4 = document.createElementNS(ns, "path");
-      p4.setAttribute("d", "M16 16h5v5");
-      svg.appendChild(p1);
-      svg.appendChild(p2);
-      svg.appendChild(p3);
-      svg.appendChild(p4);
+      (ICON_PATHS[name] || ICON_PATHS.refresh).forEach(d => {{
+        const p = document.createElementNS(ns, "path");
+        p.setAttribute("d", d);
+        svg.appendChild(p);
+      }});
       return svg;
+    }}
+
+    function iconBtn(attrs, leadIcon, labelText, trailIcon) {{
+      const kids = [];
+      if (leadIcon) kids.push(makeIcon(leadIcon, 13.5));
+      if (labelText) kids.push(el("span", {{ text: labelText }}));
+      if (trailIcon) kids.push(makeIcon(trailIcon, 13));
+      return el("button", attrs, kids);
+    }}
+
+    function makeRefreshSvg() {{
+      return makeIcon("refresh", 22, "refresh-svg");
     }}
 
     function showToast(msg) {{
@@ -1860,12 +1981,11 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
       const allRes = allUnifiedResources();
       const leftItems = [];
       if (activeTab === 2 && catalogViewMode === "detail" && allRes.length > 0) {{
-        leftItems.push(el("button", {{
+        leftItems.push(iconBtn({{
           type: "button",
           className: "back-nav-btn",
-          text: "← All Resources (" + allRes.length + ")",
           onClick: () => {{ catalogViewMode = "list"; render(); }}
-        }}));
+        }}, "arrow-left", "All Resources (" + allRes.length + ")"));
       }} else {{
         leftItems.push(makeDbtSvg());
       }}
@@ -1888,6 +2008,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
       }}
 
       const syncBtn = document.getElementById("syncBtn");
+      syncBtn.replaceChildren(makeIcon("refresh", 13), el("span", {{ text: "Sync" }}));
       syncBtn.onclick = () => dispatchAction("dbt_refresh_workspace", {{ tab: activeTab, confirmed_in_gui: false }}, "Refreshing dbt Cloud Workspace", "Re-syncing latest runs, models, source freshness & governed metrics...");
       syncActivity();
     }}
@@ -1948,11 +2069,11 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
               errFirst ? el("div", {{ style: "font-size:11.8px;color:var(--crit-text);font-family:var(--mono);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;", text: errFirst.slice(0, 110) }}) : null
             ]),
             el("div", {{ style: "display:flex;gap:6px;flex-wrap:wrap;" }}, [
-              el("button", {{ type: "button", className: "btn btn-sm btn-primary", text: "⚡ Safe Retry →", onClick: ev => {{ ev.stopPropagation(); openRetryModal(fr); }} }}),
-              d.failed_model_hint ? el("button", {{ type: "button", className: "btn btn-sm", text: "▶ Rebuild +" + d.failed_model_hint, onClick: ev => {{
+              iconBtn({{ type: "button", className: "btn btn-sm btn-primary", onClick: ev => {{ ev.stopPropagation(); openRetryModal(fr); }} }}, "retry", "Safe Retry", "arrow-right"),
+              d.failed_model_hint ? iconBtn({{ type: "button", className: "btn btn-sm", onClick: ev => {{
                 ev.stopPropagation();
                 openTriggerModal(fr.job_id, "dbt build --select +" + d.failed_model_hint + "+", "Selective rebuild after Run #" + fr.id);
-              }} }}) : null
+              }} }}, "play", "Rebuild +" + d.failed_model_hint) : null
             ])
           ]));
         }});
@@ -1960,27 +2081,27 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
         activeRuns.slice(0, 2).forEach(ar => {{
           triageItems.push(el("div", {{ className: "queue-item", onClick: () => {{ selectedRunId = ar.id; render(); }} }}, [
             el("div", null, [
-              el("span", {{ className: "pill pill-warn", text: ar.status.toUpperCase() + " · #" + ar.id }}),
+              el("span", {{ className: "pill pill-warn", text: ar.status.toUpperCase() + " - #" + ar.id }}),
               el("span", {{ style: "font-weight:700;margin-left:8px;", text: ar.job_name }})
             ]),
-            el("button", {{ type: "button", className: "btn btn-sm", text: "⏹ Cancel Run", onClick: ev => {{ ev.stopPropagation(); openCancelModal(ar); }} }})
+            iconBtn({{ type: "button", className: "btn btn-sm", onClick: ev => {{ ev.stopPropagation(); openCancelModal(ar); }} }}, "stop", "Cancel Run")
           ]));
         }});
 
         alertSources.slice(0, 2).forEach(asrc => {{
           triageItems.push(el("div", {{ className: "queue-item", onClick: () => jumpToModelInExplorer(asrc.unique_id, "overview") }}, [
             el("div", null, [
-              el("span", {{ className: statusPillClass(asrc.freshness), text: "SOURCE · " + asrc.freshness }}),
+              el("span", {{ className: statusPillClass(asrc.freshness), text: "SOURCE - " + asrc.freshness }}),
               el("span", {{ style: "font-weight:700;font-family:var(--mono);margin-left:8px;", text: asrc.name }})
             ]),
-            el("button", {{ type: "button", className: "btn btn-sm", text: "Inspect Source →", onClick: ev => {{ ev.stopPropagation(); jumpToModelInExplorer(asrc.unique_id, "overview"); }} }})
+            iconBtn({{ type: "button", className: "btn btn-sm", onClick: ev => {{ ev.stopPropagation(); jumpToModelInExplorer(asrc.unique_id, "overview"); }} }}, null, "Inspect Source", "arrow-right")
           ]));
         }});
 
         container.appendChild(el("div", {{ className: "card card-triage" }}, [
           el("div", {{ className: "row-between" }}, [
             el("div", {{ style: "font-weight:800;font-size:14.5px;", text: "Needs Review & Action (" + triageItems.length + ")" }}),
-            el("button", {{ type: "button", className: "btn btn-sm btn-navy", text: showTriggerPanel ? "Hide Job Launcher" : "▶ Launch a dbt Job", onClick: () => {{ showTriggerPanel = !showTriggerPanel; render(); }} }})
+            iconBtn({{ type: "button", className: "btn btn-sm btn-navy", onClick: () => {{ showTriggerPanel = !showTriggerPanel; render(); }} }}, showTriggerPanel ? "close" : "play", showTriggerPanel ? "Hide Job Launcher" : "Launch dbt Job")
           ]),
           el("div", {{ className: "queue-list" }}, triageItems)
         ]));
@@ -1991,7 +2112,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
               el("span", {{ className: "pill pill-ok", text: "All Clear" }}),
               el("div", {{ style: "font-weight:800;font-size:14.5px;margin-top:4px;", text: "No failed runs or stale source alerts in " + (STATE.active_project_name || "dbt Cloud") }})
             ]),
-            el("button", {{ type: "button", className: "btn btn-navy", text: showTriggerPanel ? "Hide Job Launcher" : "▶ Trigger dbt Job", onClick: () => {{ showTriggerPanel = !showTriggerPanel; render(); }} }})
+            iconBtn({{ type: "button", className: "btn btn-navy", onClick: () => {{ showTriggerPanel = !showTriggerPanel; render(); }} }}, showTriggerPanel ? "close" : "play", showTriggerPanel ? "Hide Job Launcher" : "Trigger dbt Job")
           ])
         ]));
       }}
@@ -2018,7 +2139,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
         container.appendChild(el("div", {{ className: "card" }}, [
           el("div", {{ className: "row-between" }}, [
             el("div", {{ style: "font-weight:800;font-size:14.5px;", text: "Trigger dbt Cloud Job Run" }}),
-            el("button", {{ type: "button", className: "btn btn-sm", text: "✕ Close", onClick: () => {{ showTriggerPanel = false; render(); }} }})
+            iconBtn({{ type: "button", className: "btn btn-sm", onClick: () => {{ showTriggerPanel = false; render(); }} }}, "close", "Close")
           ]),
           jobSel,
           stepsInp,
@@ -2029,9 +2150,9 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
             }} }})
           )),
           el("div", {{ className: "action-footer" }}, [
-            el("button", {{ type: "button", className: "btn btn-primary", text: "Review & Trigger Job →", onClick: () => {{
+            iconBtn({{ type: "button", className: "btn btn-primary", onClick: () => {{
               openTriggerModal(jobSel.value, stepsInp.value.trim(), "Triggered via Gemini Enterprise Workbench");
-            }} }})
+            }} }}, "play", "Review & Trigger Job", "arrow-right")
           ])
         ]));
       }}
@@ -2108,9 +2229,25 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
         cancelled: runs.filter(r => r.status_bucket === "cancelled").length
       }};
 
+      const triggerRefreshRuns = () => dispatchAction(
+        "dbt_refresh_runs",
+        {{ run_id: selectedRunId, status_filter: runStatusFilter, job_id: runJobFilter, tab: 1, confirmed_in_gui: false }},
+        "Refreshing Recent Job Runs",
+        "Fetching latest job run statuses, step logs & results from dbt Cloud..."
+      );
+
       container.appendChild(el("div", {{ className: "card" }}, [
         el("div", {{ className: "row-between" }}, [
-          el("div", {{ style: "font-weight:800;font-size:15px;", text: "Recent Job Runs" }}),
+          el("div", {{ style: "display:flex;align-items:center;gap:10px;flex-wrap:wrap;" }}, [
+            el("div", {{ style: "font-weight:800;font-size:15px;", text: "Recent Job Runs" }}),
+            iconBtn({{
+              type: "button",
+              className: "btn btn-sm",
+              id: "refreshRunsBtn",
+              title: "Refresh recent job runs and view latest run status & logs",
+              onClick: triggerRefreshRuns
+            }}, "refresh", "Refresh")
+          ]),
           countLabel
         ]),
         el("div", {{ className: "chip-bar" }}, [
@@ -2142,19 +2279,19 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
           el("div", {{ className: "row-between" }}, [
             el("div", null, [
               el("span", {{ className: statusPillClass(curRun.status), text: curRun.status.toUpperCase() }}),
-              el("h3", {{ style: "font-size:15px;font-weight:800;margin-top:4px;", text: "Run #" + curRun.id + " — " + curRun.job_name }}),
-              el("div", {{ style: "font-size:12px;color:var(--muted);font-family:var(--mono);", text: (curRun.created_at || "") + (curRun.duration ? " · Duration: " + curRun.duration : "") + ((diag && diag.git_sha) ? " · SHA " + diag.git_sha : "") }})
+              el("h3", {{ style: "font-size:15px;font-weight:800;margin-top:4px;", text: "Run #" + curRun.id + " - " + curRun.job_name }}),
+              el("div", {{ style: "font-size:12px;color:var(--muted);font-family:var(--mono);", text: (curRun.created_at || "") + (curRun.duration ? " | Duration: " + curRun.duration : "") + ((diag && diag.git_sha) ? " | SHA " + diag.git_sha : "") }})
             ]),
             el("div", {{ style: "display:flex;gap:6px;flex-wrap:wrap;" }}, [
-              isFailed ? el("button", {{ type: "button", className: "btn btn-primary", text: "⚡ Safe Retry Run →", onClick: () => openRetryModal(curRun) }}) : null,
-              isActive ? el("button", {{ type: "button", className: "btn", text: "⏹ Cancel Run →", onClick: () => openCancelModal(curRun) }}) : null,
-              curRun.job_id ? el("button", {{ type: "button", className: "btn", text: "▶ Re-Trigger Job", onClick: () => openTriggerModal(curRun.job_id, "", "Re-triggered from Run #" + curRun.id) }}) : null,
-              (!diag || !diag.deep_dive_loaded) ? el("button", {{
+              isActive ? iconBtn({{ type: "button", className: "btn btn-primary", onClick: triggerRefreshRuns }}, "refresh", "Refresh Status & Result") : null,
+              isFailed ? iconBtn({{ type: "button", className: "btn btn-primary", onClick: () => openRetryModal(curRun) }}, "retry", "Safe Retry Run", "arrow-right") : null,
+              isActive ? iconBtn({{ type: "button", className: "btn", onClick: () => openCancelModal(curRun) }}, "stop", "Cancel Run") : null,
+              curRun.job_id ? iconBtn({{ type: "button", className: "btn", onClick: () => openTriggerModal(curRun.job_id, "", "Re-triggered from Run #" + curRun.id) }}, "play", "Re-Trigger Job") : null,
+              (!diag || !diag.deep_dive_loaded) ? iconBtn({{
                 type: "button",
                 className: "btn btn-navy",
-                text: diag ? "🔍 Deep-Dive Artifacts & Docs" : "🔍 Load Step Logs & Diagnostics",
                 onClick: () => dispatchAction("dbt_deep_dive_run", {{ run_id: curRun.id, job_id: curRun.job_id, with_docs: true, confirmed_in_gui: false }}, "Deep-Diving Run #" + curRun.id, "Fetching step logs, build artifacts & dbt Docs troubleshooting...")
-              }}) : null
+              }}, "layers", diag ? "Deep-Dive Artifacts & Docs" : "Load Step Logs & Diagnostics") : null
             ])
           ]),
           (diag && diag.error_text)
@@ -2207,21 +2344,19 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
         // Detail Top Summary + Immediate Actions + Deep-Dive Trigger
         container.appendChild(el("div", {{ className: "card" }}, [
           el("div", {{ className: "row-between" }}, [
-            el("button", {{ type: "button", className: "btn btn-sm", text: "← All Resources (" + allRes.length + ")", onClick: () => {{ catalogViewMode = "list"; render(); }} }}),
+            iconBtn({{ type: "button", className: "btn btn-sm", onClick: () => {{ catalogViewMode = "list"; render(); }} }}, "arrow-left", "All Resources (" + allRes.length + ")"),
             el("div", {{ style: "display:flex;gap:6px;flex-wrap:wrap;" }}, [
-              item.ref_snippet ? el("button", {{ type: "button", className: "btn btn-sm", text: "🧪 Query in SQL Runner", onClick: () => openInSqlRunner(item.ref_snippet) }}) : null,
-              (item.kind === "mart" || item.kind === "model") && defaultJobId ? el("button", {{
+              item.ref_snippet ? iconBtn({{ type: "button", className: "btn btn-sm", onClick: () => openInSqlRunner(item.ref_snippet) }}, "terminal", "Query in SQL Runner") : null,
+              (item.kind === "mart" || item.kind === "model") && defaultJobId ? iconBtn({{
                 type: "button",
                 className: "btn btn-sm btn-primary",
-                text: "▶ Rebuild +" + item.name + "+",
                 onClick: () => openTriggerModal(defaultJobId, "dbt build --select +" + item.name + "+", "Selective build for " + item.name)
-              }}) : null,
-              (!dd || !dd.has_perf) ? el("button", {{
+              }}, "play", "Rebuild +" + item.name + "+") : null,
+              (!dd || !dd.has_perf) ? iconBtn({{
                 type: "button",
                 className: "btn btn-sm btn-navy",
-                text: dd ? "🔬 Load Run Performance History" : "🔬 Deep-Dive Lineage, SQL & Health",
                 onClick: () => dispatchAction("dbt_deep_dive_model", {{ unique_id: item.unique_id, subtab: catalogSubtab, orientation: lineageOrient, confirmed_in_gui: false }}, "Inspecting " + item.name, "Fetching lineage, compiled SQL, column schema & run performance history...")
-              }}) : null
+              }}, "activity", dd ? "Load Run Performance History" : "Deep-Dive Lineage, SQL & Health") : null
             ])
           ]),
           el("div", null, [
@@ -2249,12 +2384,11 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
             el("div", {{ style: "font-size:12.8px;color:var(--secondary);", text: "To keep browsing instant, column-level schemas, compiled warehouse SQL, DAG edges, and historical run durations are fetched on demand." }}),
             item.ref_snippet ? el("pre", {{ className: "code-box", text: "-- dbt Reference Snippet\\nSELECT *\\nFROM " + item.ref_snippet + "\\nLIMIT 25" }}) : null,
             el("div", {{ className: "action-footer" }}, [
-              el("button", {{
+              iconBtn({{
                 type: "button",
                 className: "btn btn-primary",
-                text: "🔬 Run Deep Dive on " + item.name + " →",
                 onClick: () => dispatchAction("dbt_deep_dive_model", {{ unique_id: item.unique_id, subtab: catalogSubtab, orientation: lineageOrient, confirmed_in_gui: false }}, "Deep-Diving " + item.name, "Fetching upstream/downstream lineage, compiled SQL, columns & health...")
-              }})
+              }}, "layers", "Run Deep Dive on " + item.name, "arrow-right")
             ])
           ]));
           return;
@@ -2287,7 +2421,6 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
           const isTD = lineageOrient === "td";
           const up = Array.isArray(dd.upstream) ? dd.upstream : [];
           const down = Array.isArray(dd.downstream) ? dd.downstream : [];
-          const arrowTxt = isTD ? "↓" : "→";
           const makeNode = (n, isFocus) => el("div", {{
             className: "lin-node" + (isFocus ? " focus" : ""),
             onClick: () => {{
@@ -2310,10 +2443,10 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
           container.appendChild(el("div", {{ className: "card" }}, [
             el("div", {{ className: "row-between" }}, [
               el("div", {{ style: "font-weight:800;", text: "Upstream & Downstream Dependency Graph" }}),
-              el("button", {{ type: "button", className: "btn btn-sm", text: isTD ? "⇅ Top-Down" : "⇄ Left-to-Right", onClick: () => {{
+              iconBtn({{ type: "button", className: "btn btn-sm", onClick: () => {{
                 lineageOrient = isTD ? "lr" : "td";
                 render();
-              }} }})
+              }} }}, isTD ? "rows" : "columns", isTD ? "Top-Down" : "Left-to-Right")
             ]),
             el("div", {{ className: "lineage-grid" }}, [
               el("div", {{ className: isTD ? "lin-flow-td" : "lin-flow-lr" }}, [
@@ -2321,12 +2454,12 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
                   el("div", {{ style: "font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;", text: "Upstream (" + up.length + ")" }}),
                   ...(up.length ? up.map(n => makeNode(n, false)) : [el("div", {{ style: "font-size:12px;color:var(--muted);", text: "No upstream parents" }})])
                 ]),
-                el("div", {{ style: "display:flex;align-items:center;justify-content:center;font-weight:900;color:#64748B;font-size:16px;", text: arrowTxt }}),
+                el("div", {{ style: "display:flex;align-items:center;justify-content:center;color:#64748B;" }}, [makeIcon(isTD ? "arrow-down" : "arrow-right", 16)]),
                 el("div", {{ className: "lin-col" }}, [
                   el("div", {{ style: "font-size:11px;font-weight:800;color:#B9381E;text-transform:uppercase;", text: "Selected Resource" }}),
                   makeNode({{ unique_id: dd.unique_id, name: dd.name, resource_type: dd.resource_type }}, true)
                 ]),
-                el("div", {{ style: "display:flex;align-items:center;justify-content:center;font-weight:900;color:#64748B;font-size:16px;", text: arrowTxt }}),
+                el("div", {{ style: "display:flex;align-items:center;justify-content:center;color:#64748B;" }}, [makeIcon(isTD ? "arrow-down" : "arrow-right", 16)]),
                 el("div", {{ className: "lin-col" }}, [
                   el("div", {{ style: "font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;", text: "Downstream (" + down.length + ")" }}),
                   ...(down.length ? down.map(n => makeNode(n, false)) : [el("div", {{ style: "font-size:12px;color:var(--muted);", text: "Leaf node" }})])
@@ -2398,14 +2531,16 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
               item.description ? el("div", {{ style: "font-size:12px;color:var(--secondary);margin-top:2px;", text: item.description }}) : el("div", {{ style: "font-size:11.5px;color:var(--muted);font-family:var(--mono);", text: item.unique_id }})
             ]),
             el("div", {{ style: "display:flex;gap:6px;align-items:center;" }}, [
-              item.ref_snippet ? el("button", {{
+              item.ref_snippet ? iconBtn({{
                 type: "button",
                 className: "btn btn-sm",
-                text: "SQL",
                 title: "Open in SQL Runner",
                 onClick: ev => {{ ev.stopPropagation(); openInSqlRunner(item.ref_snippet); }}
-              }}) : null,
-              el("span", {{ style: "font-weight:700;color:var(--primary);font-size:12px;", text: "Inspect →" }})
+              }}, "terminal", "SQL") : null,
+              el("span", {{ style: "display:inline-flex;align-items:center;gap:4px;font-weight:700;color:var(--primary);font-size:12px;" }}, [
+                el("span", {{ text: "Inspect" }}),
+                makeIcon("arrow-right", 13)
+              ])
             ])
           ]);
         }}) : [el("div", {{ style: "font-size:12.5px;color:var(--muted);padding:8px 2px;", text: "No resources match this local filter. Try 'AI Semantic Search' for broader discovery." }})]));
@@ -2430,16 +2565,15 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
         )),
         el("div", {{ style: "display:flex;gap:8px;" }}, [
           searchInp,
-          el("button", {{
+          iconBtn({{
             type: "button",
             className: "btn btn-navy",
             title: "Run dbt MCP get_related_models semantic search",
-            text: "🧠 AI Search",
             onClick: () => {{
               if (!searchInp.value.trim()) {{ showToast("Enter a business topic first for AI Semantic Search."); return; }}
               dispatchAction("dbt_deep_dive_model", {{ search_query: searchInp.value.trim(), confirmed_in_gui: false }}, "AI Semantic Model Search", "Finding related dbt models & hydrating lineage for '" + searchInp.value.trim() + "'...");
             }}
-          }})
+          }}, "sparkle", "AI Search")
         ]),
         listHost
       ]));
@@ -2506,10 +2640,9 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
         ]));
         sliceCard.appendChild(el("div", {{ className: "action-footer" }}, [
           isSliceDirty ? el("span", {{ style: "font-size:12px;color:var(--warn-text);font-weight:600;", text: "Selection changed — click Run Metric Slice to query warehouse" }}) : null,
-          el("button", {{
+          iconBtn({{
             type: "button",
             className: "btn btn-primary",
-            text: "▶ Run Metric Slice →",
             onClick: () => dispatchAction("dbt_metrics_query", {{
               metric: draftMetric,
               grain: draftGrain,
@@ -2518,7 +2651,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
               where_val: draftWhereVal,
               confirmed_in_gui: false
             }}, "Querying Semantic Layer", "Compiling & running MetricFlow slice for " + draftMetric + " (" + draftGrain + ")...")
-          }})
+          }}, "play", "Run Metric Slice", "arrow-right")
         ]));
       }} else {{
         sliceCard.appendChild(el("div", {{ className: "banner banner-warn", text: mv.error || "No Semantic Layer metrics were returned for this project." }}));
@@ -2627,14 +2760,14 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
         ]),
         el("div", {{ style: "display:flex;gap:8px;" }}, [
           nlInp,
-          el("button", {{ type: "button", className: "btn btn-navy", text: "✨ Generate SQL", onClick: () => {{
+          iconBtn({{ type: "button", className: "btn btn-navy", onClick: () => {{
             if (!nlInp.value.trim()) {{ showToast("Type a natural-language question first."); return; }}
             dispatchAction("dbt_sql_generate", {{ nl_prompt: nlInp.value.trim(), confirmed_in_gui: false }}, "Generating dbt SQL", "Running dbt Cloud AI text_to_sql against your governed models...");
-          }} }})
+          }} }}, "sparkle", "Generate SQL")
         ]),
         sqlArea,
         el("div", {{ className: "action-footer" }}, [
-          el("button", {{ type: "button", className: "btn btn-primary", text: "▶ Review & Execute Warehouse SQL →", onClick: () => {{
+          iconBtn({{ type: "button", className: "btn btn-primary", onClick: () => {{
             if (!sqlArea.value.trim()) {{ showToast("SQL query cannot be empty."); return; }}
             confirmModal = {{
               title: "Confirm Warehouse SQL Execution",
@@ -2646,7 +2779,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
               payload: {{ operation: "execute_sql", sql: sqlArea.value, confirmed_in_gui: true, execute: true }}
             }};
             renderModal();
-          }} }})
+          }} }}, "play", "Review & Execute Warehouse SQL", "arrow-right")
         ])
       ]));
 
@@ -2732,18 +2865,16 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
           el("div", {{ style: "font-weight:600;font-family:var(--mono);font-size:12px;word-break:break-word;", text: r.value }})
         ]))
       );
-      const backBtn = el("button", {{
+      const backBtn = iconBtn({{
         type: "button",
         className: "btn",
         disabled: isSubmitting,
-        text: "← Back to Edit",
         onClick: () => {{ if (!isSubmitting) {{ confirmModal = null; renderModal(); }} }}
-      }});
-      const okBtn = el("button", {{
+      }}, "arrow-left", "Back to Edit");
+      const okBtn = iconBtn({{
         type: "button",
         className: "btn btn-primary",
         disabled: isSubmitting,
-        text: "✓ Confirm & Execute",
         onClick: () => {{
           if (isSubmitting) return;
           const payloadToRun = confirmModal.payload;
@@ -2752,7 +2883,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
           renderModal();
           dispatchAction("dbt_execute", payloadToRun, execTitle, "Executing confirmed action via dbt Cloud MCP & refreshing Canvas...");
         }}
-      }});
+      }}, "check", "Confirm & Execute");
 
       root.appendChild(el("div", {{ className: "modal-backdrop" }}, [
         el("div", {{ className: "modal-card" }}, [
@@ -2953,14 +3084,17 @@ def handle_open_or_deep_dive(args: argparse.Namespace, command_mode: str = "open
     if command_mode == "incident":
         state["active_tab"] = 1
         st_filt = str(getattr(args, "status_filter", "") or "").lower()
-        if st_filt in ("error", "running", "success", "cancelled"):
-            state["initial_run_filter"] = st_filt
         jid = validate_int_id(getattr(args, "job_id", ""), "job_id", allow_empty=True)
         if jid:
             state["selected_job_id"] = str(jid)
         rid = validate_int_id(getattr(args, "run_id", ""), "run_id", allow_empty=True)
-        if rid:
-            deep_dive_run(gw, state, project_id=pid, run_id=rid, fetch_docs=bool(getattr(args, "with_docs", True)))
+        if bool(getattr(args, "refresh_runs", False)):
+            refresh_recent_runs(gw, state, project_id=pid, focus_run_id=rid, status_filter=st_filt)
+        else:
+            if st_filt in ("error", "running", "success", "cancelled"):
+                state["initial_run_filter"] = st_filt
+            if rid:
+                deep_dive_run(gw, state, project_id=pid, run_id=rid, fetch_docs=bool(getattr(args, "with_docs", True)))
 
     elif command_mode in ("audit", "lineage"):
         state["active_tab"] = 2
@@ -3000,7 +3134,15 @@ def handle_open_or_deep_dive(args: argparse.Namespace, command_mode: str = "open
         state["active_tab"] = tab
         # Optional targeted parameters passed to `open`
         rid = validate_int_id(getattr(args, "run_id", ""), "run_id", allow_empty=True)
-        if rid:
+        if bool(getattr(args, "refresh_runs", False)):
+            refresh_recent_runs(
+                gw,
+                state,
+                project_id=pid,
+                focus_run_id=rid,
+                status_filter=str(getattr(args, "status_filter", "") or ""),
+            )
+        elif rid:
             deep_dive_run(gw, state, project_id=pid, run_id=rid, fetch_docs=bool(getattr(args, "with_docs", False)))
         if getattr(args, "unique_id", "") or getattr(args, "query", ""):
             deep_dive_model(
@@ -3126,7 +3268,7 @@ def handle_decide_command(args: argparse.Namespace) -> dict[str, Any]:
         _refresh_runs_after_mutation(focus_rid=new_rid or str(rid))
         state["banner"] = {
             "kind": "ok",
-            "title": f"Safe Retry Queued for Run #{rid}" + (f" → New Run #{new_rid}" if new_rid else ""),
+            "title": f"Safe Retry Queued for Run #{rid}" + (f" (New Run #{new_rid})" if new_rid else ""),
             "detail": "dbt Cloud queued a retry build resuming from the point of failure.",
         }
         return stage_a2ui_canvas(state, card_title="dbt Cloud Workbench", card_description=state["banner"]["title"])
@@ -3227,6 +3369,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_open.add_argument("--job-id", default="")
     p_open.add_argument("--run-id", default="")
     p_open.add_argument("--status-filter", default="")
+    p_open.add_argument("--refresh-runs", action="store_true")
     p_open.add_argument("--with-docs", action="store_true")
     p_open.add_argument("--nl-prompt", default="")
     p_open.add_argument("--sql", default="")
@@ -3235,6 +3378,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_inc.add_argument("--job-id", default="")
     p_inc.add_argument("--run-id", default="")
     p_inc.add_argument("--status-filter", default="")
+    p_inc.add_argument("--refresh-runs", action="store_true")
     p_inc.add_argument("--with-docs", action="store_true")
 
     p_aud = sub.add_parser("audit", parents=[sub_common], help="Tab 2 Deep Dive: Model health, sources & performance")
