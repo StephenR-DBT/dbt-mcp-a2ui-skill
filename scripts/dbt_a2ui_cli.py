@@ -1517,19 +1517,20 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
     .banner-warn {{ background: var(--warn-bg); color: var(--warn-text); border-color: #FCD34D; }}
     .banner-crit {{ background: var(--crit-bg); color: var(--crit-text); border-color: #FCA5A5; }}
     .toast {{ position: fixed; bottom: 16px; right: 16px; background: #0F172A; color: #fff; padding: 8px 14px; border-radius: 999px; font-size: 12px; font-weight: 600; z-index: 120; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }}
-    .modal-backdrop {{ position: fixed; inset: 0; background: rgba(15,23,42,0.56); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 110; }}
+    .modal-backdrop {{ position: fixed; inset: 0; background: rgba(15,23,42,0.52); backdrop-filter: blur(2px); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 110; }}
     .modal-card {{ background: #fff; border-radius: 16px; width: 100%; max-width: 490px; padding: 18px; display: flex; flex-direction: column; gap: 12px; box-shadow: 0 20px 40px rgba(15,23,42,0.25); }}
+    .loading-popup-card {{ background: #fff; border: 1px solid var(--border); border-top: 4px solid var(--accent); border-radius: 16px; width: 100%; max-width: 430px; padding: 18px 20px; display: flex; flex-direction: column; gap: 12px; box-shadow: 0 22px 44px rgba(15,23,42,0.28); }}
+    .refresh-icon-wrap {{ width: 42px; height: 42px; min-width: 42px; border-radius: 12px; background: #FFF1EE; border: 1px solid #FFD5CC; color: var(--primary); display: inline-flex; align-items: center; justify-content: center; }}
+    .refresh-svg {{ width: 22px; height: 22px; animation: dbtSpin 1.05s linear infinite; }}
+    .popup-progress-track {{ height: 6px; width: 100%; background: #F1F5F9; border-radius: 999px; overflow: hidden; }}
+    .popup-progress-bar {{ width: 42%; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--primary), var(--accent), #FBBF24); animation: dbtSlide 1.15s ease-in-out infinite; }}
+    .sync-meta {{ font-size: 11.5px; color: rgba(255,255,255,0.72); font-weight: 600; white-space: nowrap; }}
     .data-grid-row {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--border); font-size: 12px; font-family: var(--mono); }}
     @keyframes dbtSpin {{ to {{ transform: rotate(360deg); }} }}
     @keyframes dbtSlide {{ 0% {{ transform: translateX(-100%); }} 100% {{ transform: translateX(260%); }} }}
-    @keyframes dbtFlip {{ 0%, 45% {{ transform: rotate(0deg); }} 50%, 95% {{ transform: rotate(180deg); }} 100% {{ transform: rotate(360deg); }} }}
-    .spin-ring {{ width: 13px; height: 13px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; display: inline-block; animation: dbtSpin 0.75s linear infinite; }}
-    .hg-icon {{ display: inline-block; width: 14px; height: 14px; animation: dbtFlip 2.2s ease-in-out infinite; }}
-    .top-band {{ height: 3px; width: 100%; background: rgba(15,23,42,0.1); overflow: hidden; display: none; }}
-    .top-band.active {{ display: block; }}
-    .top-band::after {{ content: ""; display: block; width: 40%; height: 100%; background: linear-gradient(90deg, transparent, var(--accent), #FBBF24, transparent); animation: dbtSlide 1.2s ease-in-out infinite; }}
     @media (max-width: 640px) {{
       .kpi-grid {{ grid-template-columns: repeat(2, 1fr); }}
+      .sync-meta {{ display: none; }}
     }}
     @media (max-width: 580px) {{
       .shell {{ padding: 10px 10px 38px; }}
@@ -1539,7 +1540,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
       .action-footer {{ flex-direction: column; align-items: stretch; }}
       .action-footer .btn {{ width: 100%; }}
       .modal-backdrop {{ align-items: flex-end; padding: 0; }}
-      .modal-card {{ max-width: 100%; border-radius: 20px 20px 0 0; }}
+      .modal-card, .loading-popup-card {{ max-width: 100%; border-radius: 20px 20px 0 0; }}
       .modal-actions {{ flex-direction: column-reverse; }}
       .modal-actions .btn {{ width: 100%; }}
     }}
@@ -1548,16 +1549,15 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
 <body>
   <header class="topbar">
     <div class="brand-row" id="brandHost"></div>
-    <div style="display:flex;align-items:center;gap:7px;">
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span id="syncMeta" class="sync-meta"></span>
       <div id="projHost"></div>
       <button type="button" id="syncBtn" class="back-nav-btn" title="Re-sync workspace metadata from dbt Cloud">↻ Sync</button>
-      <span id="livePill" class="pill pill-ok">● Cached</span>
     </div>
   </header>
-  <div id="topBand" class="top-band"></div>
-  <div id="permHost" style="max-width:860px;margin:0 auto;padding:0 14px;"></div>
   <main id="appRoot" class="shell"></main>
   <div id="modalRoot"></div>
+  <div id="loadingRoot"></div>
   <div id="toastRoot"></div>
 
   <script>
@@ -1605,9 +1605,11 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
     let pickerSearchText = "";
     let pickerKind = "mart"; // mart | source | macro
 
-    // Activity & Permission Latch state (Rule 13)
+    // In-Screen Refresh Popup & MCP Permission Latch state (no top-right loading spinner)
     let isSubmitting = false;
-    let submitLabel = "Running dbt tool";
+    let loadingPopupDismissed = false;
+    let submitLabel = "Refreshing dbt Cloud";
+    let submitDetail = "Running dbt Cloud MCP tool — Canvas will refresh automatically when ready.";
     let submitStartMs = 0;
     let permissionHandled = false;
     let submitTimer = null;
@@ -1645,17 +1647,28 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
       return svg;
     }}
 
-    function makeHourglassSvg() {{
+    function makeRefreshSvg() {{
       const ns = "http://www.w3.org/2000/svg";
       const svg = document.createElementNS(ns, "svg");
       svg.setAttribute("viewBox", "0 0 24 24");
-      svg.setAttribute("class", "hg-icon");
+      svg.setAttribute("class", "refresh-svg");
       svg.setAttribute("fill", "none");
       svg.setAttribute("stroke", "currentColor");
-      svg.setAttribute("stroke-width", "2.2");
-      const p = document.createElementNS(ns, "path");
-      p.setAttribute("d", "M6 2h12M6 22h12M7 2v4l5 5-5 5v6M17 2v4l-5 5 5 5v6");
-      svg.appendChild(p);
+      svg.setAttribute("stroke-width", "2.3");
+      svg.setAttribute("stroke-linecap", "round");
+      svg.setAttribute("stroke-linejoin", "round");
+      const p1 = document.createElementNS(ns, "path");
+      p1.setAttribute("d", "M21 12a9 9 0 0 0-15.4-6.4L3 8");
+      const p2 = document.createElementNS(ns, "path");
+      p2.setAttribute("d", "M3 3v5h5");
+      const p3 = document.createElementNS(ns, "path");
+      p3.setAttribute("d", "M3 12a9 9 0 0 0 15.4 6.4L21 16");
+      const p4 = document.createElementNS(ns, "path");
+      p4.setAttribute("d", "M16 16h5v5");
+      svg.appendChild(p1);
+      svg.appendChild(p2);
+      svg.appendChild(p3);
+      svg.appendChild(p4);
       return svg;
     }}
 
@@ -1679,34 +1692,64 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
       return sw >= 768 && w >= Math.min(sw * 0.80, sw - 140);
     }}
 
-    function syncActivity() {{
-      const band = document.getElementById("topBand");
-      const pill = document.getElementById("livePill");
-      const permHost = document.getElementById("permHost");
-      permHost.replaceChildren();
-      if (!isSubmitting) {{
-        band.classList.remove("active");
-        pill.className = "pill pill-ok";
-        pill.replaceChildren(el("span", {{ text: STATE.last_synced ? "● Ready · " + STATE.last_synced : "● Ready" }}));
-        return;
-      }}
-      band.classList.add("active");
+    function renderLoadingPopup() {{
+      const host = document.getElementById("loadingRoot");
+      host.replaceChildren();
+      if (!isSubmitting || loadingPopupDismissed) return;
+
       const sec = Math.max(0, Math.floor((Date.now() - submitStartMs) / 1000));
-      pill.className = "pill pill-warn";
-      pill.replaceChildren(
-        el("span", {{ className: "spin-ring" }}),
-        el("span", {{ text: (permissionHandled ? "Finishing" : submitLabel) + " (" + sec + "s)" }})
-      );
-      if (!permissionHandled && (isFullscreen() || sec >= 4)) {{
+      const subtitleText = permissionHandled
+        ? "Permission handled — finishing dbt Cloud request & refreshing Canvas..."
+        : submitDetail;
+
+      let permNotice = null;
+      if (!permissionHandled && (isFullscreen() || sec >= 3)) {{
         const msg = isFullscreen()
-          ? "Full-Screen Canvas active: if Gemini prompts 'Agent needs your permission' in Chat, exit Full Screen (top-right) and click Allow."
-          : "Running dbt Cloud MCP tool — if Gemini shows 'Agent needs your permission' in the left Chat panel, click Allow.";
-        permHost.appendChild(el("div", {{ className: "banner banner-warn", style: "margin-top:10px;display:flex;justify-content:space-between;gap:8px;align-items:center;" }}, [
-          el("div", {{ style: "display:flex;align-items:center;gap:8px;" }}, [makeHourglassSvg(), el("span", {{ text: msg }})]),
-          el("button", {{ type: "button", className: "btn btn-sm", text: "✕", onClick: () => {{ permissionHandled = true; syncActivity(); }} }})
-        ]));
+          ? "Full-Screen Canvas active: if Gemini prompts 'Agent needs your permission' in Chat, exit Full Screen and click Allow."
+          : "If Gemini prompts 'Agent needs your permission' in the left Chat panel, click Allow to continue.";
+        permNotice = el("div", {{ className: "banner banner-warn", style: "font-size:12px;padding:9px 11px;" }}, [
+          el("span", {{ text: msg }})
+        ]);
       }}
-      if (confirmModal) renderModal();
+
+      host.appendChild(el("div", {{ className: "modal-backdrop", style: "z-index:130;" }}, [
+        el("div", {{ className: "loading-popup-card", role: "status", "aria-live": "polite" }}, [
+          el("div", {{ style: "display:flex;align-items:flex-start;justify-content:space-between;gap:12px;" }}, [
+            el("div", {{ style: "display:flex;align-items:center;gap:12px;min-width:0;" }}, [
+              el("div", {{ className: "refresh-icon-wrap" }}, [makeRefreshSvg()]),
+              el("div", {{ style: "min-width:0;" }}, [
+                el("div", {{ style: "font-size:15px;font-weight:800;color:var(--text);", text: submitLabel }}),
+                el("div", {{ style: "font-size:12px;color:var(--muted);font-weight:600;margin-top:1px;", text: "Refreshing Canvas · " + sec + "s elapsed" }})
+              ])
+            ]),
+            el("button", {{
+              type: "button",
+              className: "btn btn-sm",
+              title: "Hide popup while refresh finishes in background",
+              text: "Hide",
+              onClick: () => {{
+                isSubmitting = false;
+                loadingPopupDismissed = true;
+                if (submitTimer) clearInterval(submitTimer);
+                renderLoadingPopup();
+              }}
+            }})
+          ]),
+          el("div", {{ style: "font-size:12.8px;color:var(--secondary);", text: subtitleText }}),
+          el("div", {{ className: "popup-progress-track" }}, [
+            el("div", {{ className: "popup-progress-bar" }})
+          ]),
+          permNotice
+        ])
+      ]));
+    }}
+
+    function syncActivity() {{
+      const syncMeta = document.getElementById("syncMeta");
+      if (syncMeta) {{
+        syncMeta.textContent = STATE.last_synced ? ("Synced " + STATE.last_synced) : "";
+      }}
+      renderLoadingPopup();
     }}
 
     window.addEventListener("blur", () => {{
@@ -1717,9 +1760,11 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
     }});
     window.addEventListener("resize", () => {{ if (isSubmitting) syncActivity(); }});
 
-    function dispatchAction(actionName, data, label) {{
+    function dispatchAction(actionName, data, label, detail) {{
       isSubmitting = true;
-      submitLabel = label || "Querying dbt";
+      loadingPopupDismissed = false;
+      submitLabel = label || "Refreshing dbt Cloud";
+      submitDetail = detail || "Fetching live data from dbt Cloud MCP & refreshing this workbench...";
       submitStartMs = Date.now();
       permissionHandled = false;
       if (submitTimer) clearInterval(submitTimer);
@@ -1832,7 +1877,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
       const projs = Array.isArray(STATE.projects) ? STATE.projects : [];
       if (projs.length > 0) {{
         const sel = el("select", {{ className: "proj-select", title: "Switch dbt Cloud Project", onChange: ev => {{
-          dispatchAction("dbt_switch_project", {{ project_id: ev.target.value, tab: activeTab, confirmed_in_gui: false }}, "Loading project");
+          dispatchAction("dbt_switch_project", {{ project_id: ev.target.value, tab: activeTab, confirmed_in_gui: false }}, "Switching dbt Cloud Project", "Prefetching jobs, runs, models, source freshness & metrics for the selected project...");
         }} }});
         projs.forEach(p => {{
           const opt = el("option", {{ value: p.id, text: p.name }});
@@ -1843,7 +1888,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
       }}
 
       const syncBtn = document.getElementById("syncBtn");
-      syncBtn.onclick = () => dispatchAction("dbt_refresh_workspace", {{ tab: activeTab, confirmed_in_gui: false }}, "Refreshing workspace");
+      syncBtn.onclick = () => dispatchAction("dbt_refresh_workspace", {{ tab: activeTab, confirmed_in_gui: false }}, "Refreshing dbt Cloud Workspace", "Re-syncing latest runs, models, source freshness & governed metrics...");
       syncActivity();
     }}
 
@@ -2108,7 +2153,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
                 type: "button",
                 className: "btn btn-navy",
                 text: diag ? "🔍 Deep-Dive Artifacts & Docs" : "🔍 Load Step Logs & Diagnostics",
-                onClick: () => dispatchAction("dbt_deep_dive_run", {{ run_id: curRun.id, job_id: curRun.job_id, with_docs: true, confirmed_in_gui: false }}, "Deep-diving Run #" + curRun.id)
+                onClick: () => dispatchAction("dbt_deep_dive_run", {{ run_id: curRun.id, job_id: curRun.job_id, with_docs: true, confirmed_in_gui: false }}, "Deep-Diving Run #" + curRun.id, "Fetching step logs, build artifacts & dbt Docs troubleshooting...")
               }}) : null
             ])
           ]),
@@ -2175,7 +2220,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
                 type: "button",
                 className: "btn btn-sm btn-navy",
                 text: dd ? "🔬 Load Run Performance History" : "🔬 Deep-Dive Lineage, SQL & Health",
-                onClick: () => dispatchAction("dbt_deep_dive_model", {{ unique_id: item.unique_id, subtab: catalogSubtab, orientation: lineageOrient, confirmed_in_gui: false }}, "Inspecting " + item.name)
+                onClick: () => dispatchAction("dbt_deep_dive_model", {{ unique_id: item.unique_id, subtab: catalogSubtab, orientation: lineageOrient, confirmed_in_gui: false }}, "Inspecting " + item.name, "Fetching lineage, compiled SQL, column schema & run performance history...")
               }}) : null
             ])
           ]),
@@ -2208,7 +2253,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
                 type: "button",
                 className: "btn btn-primary",
                 text: "🔬 Run Deep Dive on " + item.name + " →",
-                onClick: () => dispatchAction("dbt_deep_dive_model", {{ unique_id: item.unique_id, subtab: catalogSubtab, orientation: lineageOrient, confirmed_in_gui: false }}, "Deep-diving " + item.name)
+                onClick: () => dispatchAction("dbt_deep_dive_model", {{ unique_id: item.unique_id, subtab: catalogSubtab, orientation: lineageOrient, confirmed_in_gui: false }}, "Deep-Diving " + item.name, "Fetching upstream/downstream lineage, compiled SQL, columns & health...")
               }})
             ])
           ]));
@@ -2251,7 +2296,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
                 focusUniqueId = n.unique_id;
                 render();
               }} else {{
-                dispatchAction("dbt_deep_dive_model", {{ unique_id: n.unique_id, subtab: "lineage", orientation: lineageOrient, confirmed_in_gui: false }}, "Tracing " + n.name);
+                dispatchAction("dbt_deep_dive_model", {{ unique_id: n.unique_id, subtab: "lineage", orientation: lineageOrient, confirmed_in_gui: false }}, "Tracing Lineage: " + n.name, "Fetching dependency graph & node details from dbt Cloud...");
               }}
             }}
           }}, [
@@ -2392,7 +2437,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
             text: "🧠 AI Search",
             onClick: () => {{
               if (!searchInp.value.trim()) {{ showToast("Enter a business topic first for AI Semantic Search."); return; }}
-              dispatchAction("dbt_deep_dive_model", {{ search_query: searchInp.value.trim(), confirmed_in_gui: false }}, "Searching related models");
+              dispatchAction("dbt_deep_dive_model", {{ search_query: searchInp.value.trim(), confirmed_in_gui: false }}, "AI Semantic Model Search", "Finding related dbt models & hydrating lineage for '" + searchInp.value.trim() + "'...");
             }}
           }})
         ]),
@@ -2472,7 +2517,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
               where_dim: draftWhereDim,
               where_val: draftWhereVal,
               confirmed_in_gui: false
-            }}, "Querying MetricFlow")
+            }}, "Querying Semantic Layer", "Compiling & running MetricFlow slice for " + draftMetric + " (" + draftGrain + ")...")
           }})
         ]));
       }} else {{
@@ -2584,7 +2629,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
           nlInp,
           el("button", {{ type: "button", className: "btn btn-navy", text: "✨ Generate SQL", onClick: () => {{
             if (!nlInp.value.trim()) {{ showToast("Type a natural-language question first."); return; }}
-            dispatchAction("dbt_sql_generate", {{ nl_prompt: nlInp.value.trim(), confirmed_in_gui: false }}, "Generating dbt SQL");
+            dispatchAction("dbt_sql_generate", {{ nl_prompt: nlInp.value.trim(), confirmed_in_gui: false }}, "Generating dbt SQL", "Running dbt Cloud AI text_to_sql against your governed models...");
           }} }})
         ]),
         sqlArea,
@@ -2681,7 +2726,6 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
       const root = document.getElementById("modalRoot");
       root.replaceChildren();
       if (!confirmModal) return;
-      const sec = submitStartMs ? Math.max(0, Math.floor((Date.now() - submitStartMs) / 1000)) : 0;
       const rowsWrap = el("div", {{ style: "padding:10px 12px;background:var(--subtle);border:1px solid var(--border);border-radius:10px;display:flex;flex-direction:column;gap:7px;" }},
         (confirmModal.rows || []).map(r => el("div", null, [
           el("div", {{ style: "font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;", text: r.label }}),
@@ -2699,11 +2743,16 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
         type: "button",
         className: "btn btn-primary",
         disabled: isSubmitting,
-        onClick: () => {{ if (!isSubmitting) dispatchAction("dbt_execute", confirmModal.payload, "Executing on dbt Cloud"); }}
-      }}, isSubmitting
-        ? [el("span", {{ className: "spin-ring" }}), el("span", {{ text: (permissionHandled ? "Finishing" : "Executing") + " (" + sec + "s)" }})]
-        : [el("span", {{ text: "✓ Confirm & Execute" }})]
-      );
+        text: "✓ Confirm & Execute",
+        onClick: () => {{
+          if (isSubmitting) return;
+          const payloadToRun = confirmModal.payload;
+          const execTitle = (confirmModal.title || "Executing on dbt Cloud").replace(/^Confirm\\s+/i, "Running ");
+          confirmModal = null;
+          renderModal();
+          dispatchAction("dbt_execute", payloadToRun, execTitle, "Executing confirmed action via dbt Cloud MCP & refreshing Canvas...");
+        }}
+      }});
 
       root.appendChild(el("div", {{ className: "modal-backdrop" }}, [
         el("div", {{ className: "modal-card" }}, [
@@ -2746,7 +2795,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
             className: "nav-tab" + (activeTab === idx ? " active" : ""),
             onClick: () => {{
               if (!STATE.bundle_ready) {{
-                dispatchAction("dbt_nav", {{ tab: idx, confirmed_in_gui: false }}, "Loading workspace");
+                dispatchAction("dbt_nav", {{ tab: idx, confirmed_in_gui: false }}, "Loading dbt Cloud Workspace", "Prefetching workspace runs, models, freshness & metrics...");
                 return;
               }}
               activeTab = idx;
