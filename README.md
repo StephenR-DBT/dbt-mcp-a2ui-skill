@@ -89,6 +89,12 @@ Designed for rapid ad-hoc data validation using governed dbt references rather t
 | **On-Demand Deep Dives** | Clicking `Deep-Dive`, `Run Deep Dive`, `AI Search`, `Run Metric Slice`, or `Generate SQL` | `list_job_run_artifacts`, `search_product_docs`, `get_lineage`, `get_node_details`, `get_model_health`, `get_model_performance`, `get_related_models`, `query_metrics`, `get_metrics_compiled_sql`, `text_to_sql` |
 | **Confirmed Executions (`decide --execute`)** | Clicking `Confirm & Execute` in the Confirmation Modal (or explicit chat confirmation) | `retry_job_run`, `trigger_job_run`, `cancel_job_run`, `execute_sql` |
 
+### dbt Platform Remote MCP Environment Scoping (`prod` vs. `dev`)
+
+This skill targets the **dbt Platform Hosted Remote MCP Server** (`https://<your-dbt-host>/api/ai/v1/mcp`) rather than the local open-source `dbt-mcp` CLI server:
+- **Discovery & Semantic Layer Tools (`PROD` / Deployment Artifacts):** `get_all_models`, `get_mart_models`, `get_lineage` (explicitly requesting `SemanticModel`, `Seed`, `Model`, `Source`, `Exposure`, `Metric`, `SavedQuery`, `Test`), `get_node_details`, `list_metrics`, and `query_metrics` query built artifacts from your project's **Production / Deployment Environment**. Unbuilt YAML/SQL changes sitting only in Studio/IDE (`dev`) will appear once a build (`dbt build`) populates deployment & Semantic Layer artifacts.
+- **SQL Execution Tools (`DEV` / Personal Developer Credentials):** `execute_sql` and `text_to_sql` run through the dbt Platform SQL Gateway using the user's **Development Environment** and require personal **Development Credentials** configured inside **dbt Platform -> Account / Profile Settings -> Credentials** for the target project.
+
 ---
 
 ## Example Prompts

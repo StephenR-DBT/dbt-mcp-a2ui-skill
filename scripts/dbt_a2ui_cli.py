@@ -367,27 +367,10 @@ class DbtMcpGateway:
                 "Re-run with --endpoint 'https://<your-dbt-host>/api/ai/v1/mcp'."
             )
 
-    def call(self, tool_name: str, arguments: dict[str, Any] | None = None, *, timeout_s: int = 55) -> tuple[Any, str]:
-        if tool_name not in ALLOWED_DBT_TOOLS:
-            raise CliError(f"Tool '{tool_name}' is not in the allow-listed dbt MCP catalog.")
-        clean_args = arguments or {}
-
-        if self.fixtures is not None:
-            val = self.fixtures.get(tool_name, {})
-            if isinstance(val, dict) and "_by_id" in val:
-                lookup_key = str(
-                    clean_args.get("run_id")
-                    or clean_args.get("unique_id")
-                    or clean_args.get("name")
-                    or clean_args.get("job_id")
-                    or ""
-                )
-                val = val["_by_id"].get(lookup_key, val.get("_default", {}))
-            return val, json.dumps(val) if not isinstance(val, str) else val
-
-        self.ensure_ready()
-        cli_bin = _resolve_remote_cli_bin()
-        payload_str = json.dumps(clean_args, separators=(",", ":"))
+    def _invoke_remote_cli_once(
+        self, cli_bin: str, tool_name: str, args_dict: dict[str, Any], timeout_s: int
+    ) -> tuple[Any, str]:
+        payload_str = json.dumps(args_dict, separators=(",", ":"))
         cmd = [
             cli_bin,
             "mcp",
@@ -410,6 +393,58 @@ class DbtMcpGateway:
         if is_err:
             raise CliError(f"dbt MCP '{tool_name}' error: {mask_pii((text_str or json.dumps(data_obj))[:500])}")
         return data_obj, text_str
+
+    def call(self, tool_name: str, arguments: dict[str, Any] | None = None, *, timeout_s: int = 55) -> tuple[Any, str]:
+        if tool_name not in ALLOWED_DBT_TOOLS:
+            raise CliError(f"Tool '{tool_name}' is not in the allow-listed dbt MCP catalog.")
+        clean_args = dict(arguments or {})
+
+        if self.fixtures is not None:
+            val = self.fixtures.get(tool_name, {})
+            if isinstance(val, dict) and "_by_id" in val:
+                lookup_key = str(
+                    clean_args.get("run_id")
+                    or clean_args.get("unique_id")
+                    or clean_args.get("name")
+                    or clean_args.get("job_id")
+                    or ""
+                )
+                val = val["_by_id"].get(lookup_key, val.get("_default", {}))
+            return val, json.dumps(val) if not isinstance(val, str) else val
+
+        self.ensure_ready()
+        cli_bin = _resolve_remote_cli_bin()
+        try:
+            return self._invoke_remote_cli_once(cli_bin, tool_name, clean_args, timeout_s)
+        except CliError as err:
+            err_low = str(err).lower()
+            schema_mismatch = any(
+                tok in err_low
+                for tok in (
+                    "validation error",
+                    "extra inputs",
+                    "unexpected keyword",
+                    "unknown argument",
+                    "additional properties",
+                    "input should be",
+                    "invalid enum",
+                )
+            )
+            if schema_mismatch and clean_args:
+                optional_keys = (
+                    "limit",
+                    "direction",
+                    "types",
+                    "resource_type",
+                    "include_tests",
+                    "include_warnings",
+                    "include_default_dbt_packages",
+                    "order_by",
+                )
+                fallback_args = {k: v for k, v in clean_args.items() if k not in optional_keys}
+                if fallback_args != clean_args:
+                    return self._invoke_remote_cli_once(cli_bin, tool_name, fallback_args, timeout_s)
+            raise
 
     def call_soft(self, tool_name: str, arguments: dict[str, Any] | None = None, *, timeout_s: int = 40) -> tuple[Any, str, str]:
         """Calls a tool without aborting the batch if an optional endpoint is unavailable."""
@@ -510,7 +545,7 @@ def resolve_active_project(
     gw.ensure_ready()
     projects = state.get("projects") if isinstance(state.get("projects"), list) else []
     if not projects or requested_project_id is not None or force_refresh:
-        raw_proj, _, _ = gw.call_soft("list_projects", {"limit": 50})
+        raw_proj, _, _ = gw.call_soft("list_projects", {})
         extracted = extract_items(raw_proj, ("projects", "data", "items"))
         norm_projects: list[dict[str, Any]] = []
         for p in extracted:
@@ -638,11 +673,12 @@ def _extract_run_diagnostic(raw_rd: Any, txt_rd: str, raw_err: Any, txt_err: str
     }
 
 
-def _normalize_dbt_resource_type(raw_type: Any, uid: str = "") -> str:
+def _normalize_dbt_resource_type(raw_type: Any, uid: Any = "") -> str:
     """Normalizes CamelCase / snake_case dbt Discovery API resource types into canonical keys."""
     rt = str(raw_type or "").strip()
-    if not rt and "." in uid:
-        rt = uid.split(".")[0]
+    uid_s = str(uid or "").strip()
+    if not rt and "." in uid_s:
+        rt = uid_s.split(".")[0]
     low = re.sub(r"[\s-]+", "_", rt).lower()
     mapping = {
         "model": "model",
@@ -992,8 +1028,36 @@ def _parse_lineage_and_node(
         health_text = txt_h[:800]
 
     perf_runs: list[dict[str, Any]] = []
+    test_status_by_key: dict[str, tuple[str, str, str]] = {}
+
+    def _record_test_entry(raw_t: Any) -> None:
+        if not isinstance(raw_t, dict):
+            return
+        t_uid = str(raw_t.get("uniqueId") or raw_t.get("unique_id") or "").strip()
+        t_name = str(raw_t.get("name") or (t_uid.split(".")[-1] if t_uid else "")).strip()
+        if not t_name and not t_uid:
+            return
+        if not t_uid:
+            t_uid = f"test.{t_name}"
+        t_st = str(
+            raw_t.get("status")
+            or raw_t.get("state")
+            or raw_t.get("outcome")
+            or raw_t.get("lastRunStatus")
+            or "configured"
+        ).strip()
+        key = t_uid or t_name
+        prev = test_status_by_key.get(key)
+        if not prev or prev[2] == "configured":
+            test_status_by_key[key] = (t_uid, t_name, t_st)
+
     if raw_p is not None:
-        for r in extract_items(raw_p, ("runs", "performance", "history", "items", "data"))[:8]:
+        for r in extract_items(raw_p, ("runs", "performance", "history", "model_runs", "executions", "items", "data"))[:8]:
+            r_rt_raw = r.get("resourceType") or r.get("resource_type") or ""
+            r_uid_raw = str(r.get("uniqueId") or r.get("unique_id") or "")
+            if (r_rt_raw or r_uid_raw) and _normalize_dbt_resource_type(r_rt_raw, r_uid_raw) == "test":
+                _record_test_entry(r)
+                continue
             exec_s = (
                 r.get("executionTime")
                 or r.get("execution_time")
@@ -1007,10 +1071,86 @@ def _parse_lineage_and_node(
                 exec_val = 0.0
             perf_runs.append({
                 "run_id": str(r.get("runId") or r.get("run_id") or ""),
-                "status": str(r.get("status") or "success"),
+                "status": str(r.get("status") or r.get("runStatus") or "success"),
                 "execution_seconds": exec_val,
-                "completed_at": str(r.get("executeCompletedAt") or r.get("created_at") or "")[:19],
+                "completed_at": str(
+                    r.get("executeCompletedAt")
+                    or r.get("execute_completed_at")
+                    or r.get("completedAt")
+                    or r.get("created_at")
+                    or ""
+                )[:19],
             })
+            for rt in (r.get("tests") or r.get("testResults") or r.get("test_results") or []):
+                _record_test_entry(rt)
+        if isinstance(raw_p, dict):
+            for rt in (raw_p.get("tests") or raw_p.get("testResults") or raw_p.get("test_results") or []):
+                _record_test_entry(rt)
+
+    for container_obj in (raw_h, nd_dict):
+        if isinstance(container_obj, dict):
+            for rt in (container_obj.get("tests") or container_obj.get("testResults") or container_obj.get("test_results") or []):
+                _record_test_entry(rt)
+
+    # Attach test nodes directly connected to `lin_uid` in `dedup_edges` (fallback to downstream/upstream only if edgeless)
+    if dedup_edges:
+        for u_id, v_id in dedup_edges:
+            other_uid = v_id if u_id == lin_uid else (u_id if v_id == lin_uid else "")
+            if other_uid and other_uid in node_map and node_map[other_uid].get("resource_type") == "test":
+                _record_test_entry(node_map[other_uid])
+    else:
+        for dn in downstream_nodes + upstream_nodes:
+            if dn.get("resource_type") == "test":
+                _record_test_entry(dn)
+
+    sorted_tests = sorted(
+        test_status_by_key.values(),
+        key=lambda item: (
+            0 if str(item[2]).lower() in ("fail", "error", "warn") else 1,
+            1 if item[1].lower().startswith(("not_null_", "unique_", "accepted_values_", "relationships_")) else 0,
+            item[1].lower(),
+        ),
+    )
+    attached_tests = [
+        {"unique_id": uid_v, "name": name_v, "status": st_v}
+        for uid_v, name_v, st_v in sorted_tests[:30]
+    ]
+
+    h_dict = raw_h if isinstance(raw_h, dict) else {}
+    last_run_at = (
+        (perf_runs[0]["completed_at"] if perf_runs and perf_runs[0].get("completed_at") else "")
+        or str(
+            nd_dict.get("executeCompletedAt")
+            or nd_dict.get("execute_completed_at")
+            or nd_dict.get("lastRunAt")
+            or nd_dict.get("last_run_at")
+            or h_dict.get("lastRunAt")
+            or h_dict.get("last_run_at")
+            or h_dict.get("executeCompletedAt")
+            or h_dict.get("maxLoadedAt")
+            or nd_dict.get("maxLoadedAt")
+            or ""
+        )[:19]
+    )
+    last_run_status = (
+        (perf_runs[0]["status"] if perf_runs and perf_runs[0].get("status") else "")
+        or str(
+            nd_dict.get("lastRunStatus")
+            or nd_dict.get("last_run_status")
+            or nd_dict.get("executionStatus")
+            or h_dict.get("lastRunStatus")
+            or h_dict.get("last_run_status")
+            or h_dict.get("status")
+            or ""
+        )
+    )
+    last_exec_sec = perf_runs[0]["execution_seconds"] if perf_runs else 0.0
+    if not last_exec_sec:
+        raw_et = nd_dict.get("executionTime") or nd_dict.get("execution_time") or h_dict.get("executionTime") or 0
+        try:
+            last_exec_sec = round(float(raw_et), 2)
+        except (TypeError, ValueError):
+            last_exec_sec = 0.0
 
     return {
         "unique_id": lin_uid,
@@ -1032,12 +1172,79 @@ def _parse_lineage_and_node(
         "downstream": downstream_nodes,
         "dag_nodes": dag_nodes,
         "dag_edges": dag_edges,
+        "attached_tests": attached_tests,
+        "last_run_at": last_run_at,
+        "last_run_status": last_run_status,
+        "last_execution_seconds": last_exec_sec,
         "health_kv": health_kv,
         "health_text": health_text,
         "performance": perf_runs,
         "has_perf": include_perf or bool(perf_runs),
         "fallback_text": txt_nd[:900] if not cols_out and not nd_dict else "",
     }
+
+
+PLATFORM_LINEAGE_TYPES_FULL: list[str] = [
+    "Model",
+    "Source",
+    "Seed",
+    "Snapshot",
+    "Exposure",
+    "SemanticModel",
+    "Metric",
+    "SavedQuery",
+    "Test",
+]
+
+PLATFORM_LINEAGE_TYPES_CORE: list[str] = [
+    "Model",
+    "Source",
+    "Seed",
+    "Snapshot",
+    "Exposure",
+    "SemanticModel",
+    "Metric",
+]
+
+
+def _call_platform_lineage(
+    gw: DbtMcpGateway,
+    *,
+    project_id: int,
+    unique_id: str,
+    depth: int = 5,
+) -> tuple[Any, str, str]:
+    """Calls `get_lineage` using the hosted dbt Platform Remote MCP spec (`/api/ai/v1/mcp`), explicitly including `SemanticModel`."""
+    data, txt, err = gw.call_soft(
+        "get_lineage",
+        {
+            "project_id": project_id,
+            "unique_id": unique_id,
+            "types": PLATFORM_LINEAGE_TYPES_FULL,
+            "depth": depth,
+        },
+    )
+    if not err:
+        return data, txt, ""
+    data2, txt2, err2 = gw.call_soft(
+        "get_lineage",
+        {
+            "project_id": project_id,
+            "unique_id": unique_id,
+            "types": PLATFORM_LINEAGE_TYPES_CORE,
+            "depth": depth,
+        },
+    )
+    if not err2:
+        return data2, txt2, ""
+    return gw.call_soft(
+        "get_lineage",
+        {
+            "project_id": project_id,
+            "unique_id": unique_id,
+            "depth": depth,
+        },
+    )
 
 
 def hydrate_workspace_bundle(
@@ -1052,17 +1259,17 @@ def hydrate_workspace_bundle(
     if not force_refresh and already_pid == str(project_id) and state.get("bundle_ready"):
         return
 
-    # Wave 1: Fetch all catalog & operational lists concurrently
+    # Wave 1: Fetch all catalog & operational lists concurrently using exact dbt Platform Remote MCP spec
     wave1 = gw.call_parallel({
         "jobs": ("list_jobs", {"project_id": project_id, "limit": 50}),
         "runs": ("list_jobs_runs", {"order_by": "-created_at", "limit": 40}),
-        "marts": ("get_mart_models", {"project_id": project_id, "limit": 60}),
-        "models": ("get_all_models", {"project_id": project_id, "limit": 100}),
-        "sources": ("get_all_sources", {"project_id": project_id, "limit": 60}),
-        "exposures": ("get_exposures", {"project_id": project_id, "limit": 40}),
+        "marts": ("get_mart_models", {"project_id": project_id}),
+        "models": ("get_all_models", {"project_id": project_id}),
+        "sources": ("get_all_sources", {"project_id": project_id}),
+        "exposures": ("get_exposures", {"project_id": project_id}),
         "metrics": ("list_metrics", {"project_id": project_id}),
         "saved_queries": ("list_saved_queries", {"project_id": project_id}),
-        "macros": ("get_all_macros", {"project_id": project_id, "include_default_dbt_packages": False, "limit": 40}),
+        "macros": ("get_all_macros", {"project_id": project_id, "include_default_dbt_packages": False}),
     })
 
     # 1. Jobs & Runs
@@ -1252,21 +1459,24 @@ def hydrate_workspace_bundle(
         wave2_specs[f"rd_{rid_str}"] = ("get_job_run_details", {"run_id": rid_i})
         wave2_specs[f"re_{rid_str}"] = ("get_job_run_error", {"run_id": rid_i, "include_warnings": True})
 
-    focus_model_uid = ""
-    if norm_marts:
-        focus_model_uid = norm_marts[0]["unique_id"]
-    elif norm_models:
-        mart_like = next((c for c in norm_models if not c["name"].startswith("stg_")), norm_models[0])
-        focus_model_uid = mart_like["unique_id"]
+    lineage_seed_uids: list[str] = []
+    for cand_m in norm_marts + [c for c in norm_models if not c["name"].startswith("stg_")] + norm_models:
+        cuid = cand_m["unique_id"]
+        if cuid and cuid not in lineage_seed_uids:
+            lineage_seed_uids.append(cuid)
+        if len(lineage_seed_uids) >= 3:
+            break
+
+    focus_model_uid = lineage_seed_uids[0] if lineage_seed_uids else ""
 
     if focus_model_uid:
         id_arg = {"unique_id": focus_model_uid} if "." in focus_model_uid else {"name": focus_model_uid}
-        wave2_specs["focus_lin"] = (
-            "get_lineage",
-            {"project_id": project_id, "unique_id": focus_model_uid, "direction": "both", "depth": 5, "limit": 150},
-        )
         wave2_specs["focus_nd"] = ("get_node_details", {"project_id": project_id, "resource_type": "model", **id_arg})
         wave2_specs["focus_mh"] = ("get_model_health", {"project_id": project_id, **id_arg})
+        wave2_specs["focus_mp"] = (
+            "get_model_performance",
+            {"project_id": project_id, **id_arg, "num_runs": 8, "include_tests": True},
+        )
 
     first_metric = metrics_list[0]["name"] if metrics_list else ""
     if first_metric:
@@ -1281,7 +1491,17 @@ def hydrate_workspace_bundle(
         wave2_specs["met_q"] = ("query_metrics", q_init)
         wave2_specs["met_sql"] = ("get_metrics_compiled_sql", q_init)
 
-    wave2 = gw.call_parallel(wave2_specs, max_workers=8)
+    lin_results: dict[str, tuple[Any, str, str]] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as lin_pool:
+        lin_futs = {
+            lin_pool.submit(_call_platform_lineage, gw, project_id=project_id, unique_id=suid, depth=5): suid
+            for suid in lineage_seed_uids
+        }
+        wave2 = gw.call_parallel(wave2_specs, max_workers=8)
+        for lf in concurrent.futures.as_completed(lin_futs):
+            suid = lin_futs[lf]
+            with contextlib.suppress(Exception):
+                lin_results[suid] = lf.result()
 
     run_diagnostics: dict[str, dict[str, Any]] = (
         state.get("run_diagnostics") if isinstance(state.get("run_diagnostics"), dict) and not force_refresh else {}
@@ -1295,12 +1515,19 @@ def hydrate_workspace_bundle(
         state.get("model_deep_dives") if isinstance(state.get("model_deep_dives"), dict) and not force_refresh else {}
     )
     if focus_model_uid:
-        raw_lin, _, _ = wave2.get("focus_lin", ({}, "", ""))
+        raw_lin, _, _ = lin_results.get(focus_model_uid, ({}, "", ""))
         raw_nd, txt_nd, _ = wave2.get("focus_nd", ({}, "", ""))
         raw_mh, txt_mh, _ = wave2.get("focus_mh", ({}, "", ""))
+        raw_mp, _, _ = wave2.get("focus_mp", (None, "", ""))
         model_deep_dives[focus_model_uid] = _parse_lineage_and_node(
-            focus_model_uid, raw_lin, raw_nd, txt_nd, raw_mh, txt_mh
+            focus_model_uid, raw_lin, raw_nd, txt_nd, raw_mh, txt_mh, raw_mp, include_perf=True
         )
+    for extra_uid in lineage_seed_uids[1:]:
+        raw_extra_lin, _, extra_err = lin_results.get(extra_uid, ({}, "", ""))
+        if not extra_err and raw_extra_lin and extra_uid not in model_deep_dives:
+            model_deep_dives[extra_uid] = _parse_lineage_and_node(
+                extra_uid, raw_extra_lin, {}, "", {}, "", None, include_perf=False
+            )
 
     # Initial Metric Slice
     dims_list: list[dict[str, str]] = []
@@ -1405,6 +1632,8 @@ def hydrate_workspace_bundle(
         "generated_sql": default_sql,
         "query_rows": prev_sql.get("query_rows") or [],
         "query_text": prev_sql.get("query_text") or "",
+        "sql_error": str(prev_sql.get("sql_error") or ""),
+        "sql_credentials_hint": str(prev_sql.get("sql_credentials_hint") or ""),
     }
 
 
@@ -1602,15 +1831,16 @@ def deep_dive_model(
 
     id_arg = {"unique_id": target_uid} if "." in target_uid else {"name": target_uid}
     specs: dict[str, tuple[str, dict[str, Any] | None]] = {
-        "lin": ("get_lineage", {"project_id": project_id, "unique_id": target_uid, "direction": "both", "depth": 5, "limit": 150}),
         "nd": ("get_node_details", {"project_id": project_id, "resource_type": nd_rtype, **id_arg}),
     }
     if guessed_rtype == "model":
         specs["mh"] = ("get_model_health", {"project_id": project_id, **id_arg})
         specs["mp"] = ("get_model_performance", {"project_id": project_id, **id_arg, "num_runs": 8, "include_tests": True})
 
-    batch = gw.call_parallel(specs)
-    raw_lin, _, _ = batch["lin"]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        lin_fut = pool.submit(_call_platform_lineage, gw, project_id=project_id, unique_id=target_uid, depth=5)
+        batch = gw.call_parallel(specs)
+        raw_lin, _, _ = lin_fut.result()
     raw_nd, txt_nd, _ = batch["nd"]
     raw_mh, txt_mh, _ = batch.get("mh", ({}, "", ""))
     raw_mp, _, _ = batch.get("mp", (None, "", ""))
@@ -1766,6 +1996,9 @@ def deep_dive_generate_sql(
                 generated_sql = f"SELECT *\nFROM {marts[0]['ref_snippet']}\nLIMIT 25"
     sv["nl_prompt"] = nl_prompt or str(sv.get("nl_prompt") or "")
     sv["generated_sql"] = generated_sql[:3500]
+    if nl_prompt or sql_override:
+        sv["sql_error"] = ""
+        sv["sql_credentials_hint"] = ""
     state["sql_view"] = sv
 
 
@@ -1875,7 +2108,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
     .dbt-dag-col-td {{ display: flex; flex-direction: row; justify-content: center; align-items: center; flex-wrap: wrap; gap: 15px; }}
     .dbt-dag-node {{ position: relative; background: #FFFFFF; border: 1px solid #94A3B8; border-radius: 6px; padding: 9px 14px 9px 9px; min-width: 156px; max-width: 272px; display: flex; align-items: center; gap: 10px; cursor: pointer; box-shadow: 0 1px 2px rgba(15,23,42,0.04); transition: border-color 0.14s ease, box-shadow 0.14s ease, opacity 0.14s ease; }}
     .dbt-dag-node:hover {{ border-color: #334155; box-shadow: 0 3px 10px rgba(15,23,42,0.10); }}
-    .dbt-dag-node.focus {{ border: 1.8px solid #1E293B; box-shadow: 0 4px 14px rgba(15,23,42,0.14); cursor: default; }}
+    .dbt-dag-node.focus {{ border: 1.8px solid #1E293B; box-shadow: 0 4px 14px rgba(15,23,42,0.14); cursor: pointer; }}
     .dbt-dag-node.hl-active {{ border-color: #1E293B; box-shadow: 0 3px 10px rgba(15,23,42,0.12); }}
     .dbt-dag-node.hl-dim {{ opacity: 0.34; }}
     .dbt-res-badge {{ width: 32px; height: 32px; min-width: 32px; border-radius: 5px; display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; flex-shrink: 0; }}
@@ -1883,8 +2116,13 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
     .dbt-res-code {{ font-size: 8.5px; font-weight: 800; letter-spacing: 0.03em; line-height: 1; font-family: var(--sans); }}
     .dbt-node-label {{ font-family: var(--sans); font-size: 12.5px; font-weight: 500; color: #1E293B; line-height: 1.3; word-break: break-word; text-align: left; }}
     .dbt-dag-node.focus .dbt-node-label {{ font-weight: 600; color: #0F172A; }}
-    .dbt-type-filter-chip {{ border: 1px solid #CBD5E1; background: #FFFFFF; color: #1E293B; border-radius: 6px; padding: 4px 9px; font-size: 11.5px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-family: inherit; }}
-    .dbt-type-filter-chip.off {{ opacity: 0.48; background: #F1F5F9; color: #64748B; }}
+    .dbt-type-filter-chip {{ border: 1.5px solid #475569; background: #FFFFFF; color: #0F172A; border-radius: 6px; padding: 4px 9px; font-size: 11.5px; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-family: inherit; transition: opacity 0.12s, background 0.12s, border-color 0.12s; }}
+    .dbt-type-filter-chip.off {{ opacity: 0.62; border: 1px dashed #94A3B8; background: #F8FAFC; color: #64748B; font-weight: 600; }}
+    .dbt-type-filter-chip:hover {{ opacity: 1; border-color: #1E293B; }}
+    .detail-kpi-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }}
+    .detail-kpi-box {{ background: var(--subtle); border: 1px solid var(--border); border-radius: 9px; padding: 9px 11px; display: flex; flex-direction: column; gap: 3px; }}
+    .detail-kpi-lbl {{ font-size: 10.8px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }}
+    .detail-kpi-val {{ font-size: 13px; font-weight: 800; color: var(--text); font-family: var(--mono); word-break: break-word; }}
     .dbt-type-dot {{ width: 10px; height: 10px; border-radius: 3px; display: inline-block; flex-shrink: 0; border: 1px solid rgba(15,23,42,0.12); }}
     .dbt-zoom-group {{ display: inline-flex; align-items: center; border: 1px solid #CBD5E1; border-radius: 7px; overflow: hidden; background: #fff; }}
     .dbt-zoom-btn {{ border: none; background: transparent; color: #334155; padding: 4px 8px; font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit; min-height: 28px; }}
@@ -1968,7 +2206,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
     let isMobileInit = (window.innerWidth || 800) < 580;
     let lineageOrient = String(STATE.lineage_orientation || (isMobileInit ? "td" : "lr"));
     let lineageZoom = 1.0;
-    let lineageHiddenTypes = {{}};
+    let lineageHiddenTypes = {{ test: true }};
     let activeLineageRedraw = null;
 
     // Tab 3: Semantic Metrics client-side state
@@ -1993,6 +2231,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
     let loadingPopupDismissed = false;
     let submitLabel = "Refreshing dbt Cloud";
     let submitDetail = "Running dbt Cloud MCP tool — Canvas will refresh automatically when ready.";
+    let submitToolHint = "";
     let submitStartMs = 0;
     let permissionHandled = false;
     let submitTimer = null;
@@ -2176,7 +2415,10 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
       check: ["M20 6L9 17l-5-5"],
       close: ["M18 6L6 18", "M6 6l12 12"],
       columns: ["M3 3h7v18H3z", "M14 3h7v18h-7z"],
-      rows: ["M3 3h18v7H3z", "M3 14h18v7H3z"]
+      rows: ["M3 3h18v7H3z", "M3 14h18v7H3z"],
+      shield: ["M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z", "M9 12l2 2 4-4"],
+      alert: ["M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z", "M12 9v4", "M12 17h.01"],
+      "git-branch": ["M6 3v12", "M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6z", "M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6z", "M18 9a9 9 0 0 1-9 9"]
     }};
 
     function makeIcon(name, size, extraClass) {{
@@ -2232,6 +2474,24 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
       return sw >= 768 && w >= Math.min(sw * 0.80, sw - 140);
     }}
 
+    function inferToolHint(actionName, data) {{
+      const d = data || {{}};
+      if (actionName === "dbt_execute") {{
+        const op = String(d.operation || "").toLowerCase();
+        if (op === "execute_sql") return "execute_sql";
+        if (op === "retry_run") return "retry_job_run";
+        if (op === "trigger_job") return "trigger_job_run";
+        if (op === "cancel_run") return "cancel_job_run";
+        return op || "dbt_execute";
+      }}
+      if (actionName === "dbt_sql_generate") return "text_to_sql";
+      if (actionName === "dbt_metrics_query") return "query_metrics";
+      if (actionName === "dbt_deep_dive_model") return d.search_query ? "get_related_models" : "get_lineage / get_node_details";
+      if (actionName === "dbt_deep_dive_run") return "get_job_run_details / get_job_run_error";
+      if (actionName === "dbt_refresh_runs") return "list_jobs_runs";
+      return "dbt MCP tools";
+    }}
+
     function renderLoadingPopup() {{
       const host = document.getElementById("loadingRoot");
       host.replaceChildren();
@@ -2239,16 +2499,27 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
 
       const sec = Math.max(0, Math.floor((Date.now() - submitStartMs) / 1000));
       const subtitleText = permissionHandled
-        ? "Permission handled — finishing dbt Cloud request & refreshing Canvas..."
+        ? "Permission handled — finishing dbt Platform request & refreshing Canvas..."
         : submitDetail;
 
       let permNotice = null;
-      if (!permissionHandled && (isFullscreen() || sec >= 3)) {{
-        const msg = isFullscreen()
-          ? "Full-Screen Canvas active: if Gemini prompts 'Agent needs your permission' in Chat, exit Full Screen and click Allow."
-          : "If Gemini prompts 'Agent needs your permission' in the left Chat panel, click Allow to continue.";
-        permNotice = el("div", {{ className: "banner banner-warn", style: "font-size:12px;padding:9px 11px;" }}, [
-          el("span", {{ text: msg }})
+      if (!permissionHandled) {{
+        const toolRef = submitToolHint ? " (" + submitToolHint + ")" : "";
+        const permTitle = isFullscreen()
+          ? "Permission May Be Required — Exit Full Screen & View Chat Window"
+          : "Permission May Be Required — View Chat Window & Click 'Allow'";
+        const permBody = isFullscreen()
+          ? "Full-Screen Canvas is active. If the agent asks for permission to run" + toolRef + ", exit Full Screen to view the Chat window and click 'Allow' to grant permission."
+          : "If the agent asks for tool permission" + toolRef + ", please view the Chat window on the left and click 'Allow' to grant permission so execution can continue.";
+        permNotice = el("div", {{
+          className: "banner banner-warn",
+          style: "font-size:12px;padding:10px 12px;display:flex;align-items:flex-start;gap:9px;margin-top:2px;"
+        }}, [
+          el("span", {{ style: "flex-shrink:0;margin-top:1px;color:var(--warn-text);" }}, [makeIcon("shield", 16)]),
+          el("div", {{ style: "min-width:0;flex:1;" }}, [
+            el("div", {{ style: "font-weight:800;color:var(--warn-text);", text: permTitle }}),
+            el("div", {{ style: "margin-top:2px;line-height:1.4;", text: permBody }})
+          ])
         ]);
       }}
 
@@ -2307,7 +2578,8 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
       isSubmitting = true;
       loadingPopupDismissed = false;
       submitLabel = label || "Refreshing dbt Cloud";
-      submitDetail = detail || "Fetching live data from dbt Cloud MCP & refreshing this workbench...";
+      submitDetail = detail || "Fetching live data from dbt Platform MCP & refreshing this workbench...";
+      submitToolHint = inferToolHint(actionName, data);
       submitStartMs = Date.now();
       permissionHandled = false;
       if (submitTimer) clearInterval(submitTimer);
@@ -2317,6 +2589,41 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
       try {{
         window.parent.postMessage({{ type: "a2ui_action", action: actionName, data: payload }}, "*");
       }} catch (e) {{}}
+    }}
+
+    function makeSemanticEmptyCallout(rawErrText) {{
+      const jobs = Array.isArray(STATE.jobs) ? STATE.jobs : [];
+      return el("div", {{
+        className: "banner banner-warn",
+        style: "padding:13px 14px;display:flex;flex-direction:column;gap:9px;"
+      }}, [
+        el("div", {{ style: "display:flex;align-items:flex-start;gap:10px;" }}, [
+          el("span", {{ style: "flex-shrink:0;margin-top:2px;color:var(--warn-text);" }}, [makeIcon("alert", 17)]),
+          el("div", {{ style: "min-width:0;flex:1;" }}, [
+            el("div", {{ style: "font-weight:800;font-size:13.5px;color:var(--warn-text);", text: "No Semantic Layer Artifacts Populated Yet" }}),
+            el("div", {{
+              style: "margin-top:4px;font-size:12.4px;line-height:1.45;color:var(--text);",
+              text: "dbt Platform MCP Discovery & Semantic Layer tools check built artifacts from your deployment environment rather than unbuilt Studio/IDE files. If you already have a semantic model or metrics in this project, you may need to run a dev or production build (dbt build) to populate your Semantic Layer artifacts."
+            }}),
+            rawErrText ? el("div", {{
+              style: "margin-top:6px;font-family:var(--mono);font-size:11.3px;color:var(--secondary);word-break:break-word;",
+              text: "MCP detail: " + rawErrText
+            }}) : null
+          ])
+        ]),
+        el("div", {{ style: "display:flex;gap:8px;flex-wrap:wrap;padding-left:27px;" }}, [
+          jobs.length > 0 ? iconBtn({{
+            type: "button",
+            className: "btn btn-sm btn-primary",
+            onClick: () => openTriggerModal("", "dbt build", "Run build to populate Semantic Layer & Discovery artifacts")
+          }}, "play", "Trigger dbt Build Job", "arrow-right") : null,
+          iconBtn({{
+            type: "button",
+            className: "btn btn-sm",
+            onClick: () => dispatchAction("dbt_refresh_workspace", {{ tab: activeTab, confirmed_in_gui: false }}, "Re-Syncing Semantic Layer & Catalog", "Checking dbt Platform MCP for newly built Semantic Layer artifacts...")
+          }}, "refresh", "Sync Workspace")
+        ])
+      ]);
     }}
 
     // Helper: Open staged Confirmation Modal in 0ms client-side
@@ -2376,8 +2683,72 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
       renderModal();
     }}
 
+    function resolveResourceUid(rawId) {{
+      const s = String(rawId || "").trim();
+      if (!s) return "";
+      const deepDives = STATE.model_deep_dives || {{}};
+      if (deepDives[s]) return s;
+      const allRes = allUnifiedResources();
+      const exact = allRes.find(r => r.unique_id === s);
+      if (exact) return exact.unique_id;
+      const byName = allRes.find(r => r.name === s && String(r.unique_id || "").includes("."));
+      if (byName) return byName.unique_id;
+      for (const dd of Object.values(deepDives)) {{
+        const dnodes = (dd && Array.isArray(dd.dag_nodes)) ? dd.dag_nodes : [];
+        const hit = dnodes.find(n => n && (n.unique_id === s || n.name === s));
+        if (hit && hit.unique_id) return hit.unique_id;
+      }}
+      return s;
+    }}
+
+    function openResourceDetail(rawId, labelName) {{
+      const uid = resolveResourceUid(rawId);
+      if (!uid) return;
+      const deepDives = STATE.model_deep_dives || {{}};
+      const dd = deepDives[uid];
+      const rtype = normalizeResType((dd && dd.resource_type) || "", uid);
+      if (dd && (dd.has_perf || rtype !== "model")) {{
+        focusUniqueId = uid;
+        catalogViewMode = "detail";
+        catalogSubtab = "overview";
+        activeTab = 2;
+        render();
+      }} else {{
+        dispatchAction(
+          "dbt_deep_dive_model",
+          {{ unique_id: uid, subtab: "overview", orientation: lineageOrient, confirmed_in_gui: false }},
+          "Loading Details: " + (labelName || uid.split(".").pop()),
+          "Fetching last run history, attached tests, compiled SQL & lineage..."
+        );
+      }}
+    }}
+
+    function openResourceLineage(rawId, labelName) {{
+      const uid = resolveResourceUid(rawId);
+      if (!uid) return;
+      const deepDives = STATE.model_deep_dives || {{}};
+      if (deepDives[uid]) {{
+        focusUniqueId = uid;
+        catalogViewMode = "detail";
+        catalogSubtab = "lineage";
+        activeTab = 2;
+        render();
+      }} else {{
+        dispatchAction(
+          "dbt_deep_dive_model",
+          {{ unique_id: uid, subtab: "lineage", orientation: lineageOrient, confirmed_in_gui: false }},
+          "Opening Lineage: " + (labelName || uid.split(".").pop()),
+          "Fetching multi-hop dbt Platform lineage graph & resource metadata..."
+        );
+      }}
+    }}
+
     function jumpToModelInExplorer(uid, subtab) {{
-      focusUniqueId = String(uid || "");
+      if (subtab === "lineage") {{
+        openResourceLineage(uid);
+        return;
+      }}
+      focusUniqueId = resolveResourceUid(uid);
       catalogViewMode = "detail";
       catalogSubtab = subtab || "overview";
       activeTab = 2;
@@ -2526,6 +2897,10 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
             ]),
             el("div", {{ style: "display:flex;gap:6px;flex-wrap:wrap;" }}, [
               iconBtn({{ type: "button", className: "btn btn-sm btn-primary", onClick: ev => {{ ev.stopPropagation(); openRetryModal(fr); }} }}, "retry", "Safe Retry", "arrow-right"),
+              d.failed_model_hint ? iconBtn({{ type: "button", className: "btn btn-sm", title: "Open " + d.failed_model_hint + " in Lineage Graph", onClick: ev => {{
+                ev.stopPropagation();
+                openResourceLineage(d.failed_model_hint, d.failed_model_hint);
+              }} }}, "git-branch", "Lineage") : null,
               d.failed_model_hint ? iconBtn({{ type: "button", className: "btn btn-sm", onClick: ev => {{
                 ev.stopPropagation();
                 openTriggerModal(fr.job_id, "dbt build --select +" + d.failed_model_hint + "+", "Selective rebuild after Run #" + fr.id);
@@ -2553,7 +2928,10 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
               el("span", {{ className: statusPillClass(asrc.freshness), text: "SOURCE - " + asrc.freshness }}),
               el("span", {{ style: "font-weight:700;font-family:var(--mono);margin-left:8px;", text: asrc.name }})
             ]),
-            iconBtn({{ type: "button", className: "btn btn-sm", onClick: ev => {{ ev.stopPropagation(); jumpToModelInExplorer(asrc.unique_id, "overview"); }} }}, null, "Inspect Source", "arrow-right")
+            el("div", {{ style: "display:flex;gap:6px;align-items:center;flex-wrap:wrap;" }}, [
+              iconBtn({{ type: "button", className: "btn btn-sm", title: "Trace downstream impact in Lineage Graph", onClick: ev => {{ ev.stopPropagation(); openResourceLineage(asrc.unique_id, asrc.name); }} }}, "git-branch", "Lineage"),
+              iconBtn({{ type: "button", className: "btn btn-sm", onClick: ev => {{ ev.stopPropagation(); jumpToModelInExplorer(asrc.unique_id, "overview"); }} }}, null, "Inspect Source", "arrow-right")
+            ])
           ]));
         }});
 
@@ -2747,6 +3125,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
             el("div", {{ style: "display:flex;gap:6px;flex-wrap:wrap;" }}, [
               isActive ? iconBtn({{ type: "button", className: "btn btn-primary", onClick: () => triggerRefreshRuns(curRun.id) }}, "refresh", "Refresh Status & Result") : null,
               isFailed ? iconBtn({{ type: "button", className: "btn btn-primary", onClick: () => openRetryModal(curRun) }}, "retry", "Safe Retry Run", "arrow-right") : null,
+              (diag && diag.failed_model_hint) ? iconBtn({{ type: "button", className: "btn", onClick: () => openResourceLineage(diag.failed_model_hint, diag.failed_model_hint) }}, "git-branch", "Lineage: " + diag.failed_model_hint) : null,
               isActive ? iconBtn({{ type: "button", className: "btn", onClick: () => openCancelModal(curRun) }}, "stop", "Cancel Run") : null,
               curRun.job_id ? iconBtn({{ type: "button", className: "btn", onClick: () => openTriggerModal(curRun.job_id, "", "Re-triggered from Run #" + curRun.id) }}, "play", "Re-Trigger Job") : null,
               (!diag || !diag.deep_dive_loaded) ? iconBtn({{
@@ -3078,6 +3457,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
         }});
       }};
 
+      let didDragPan = false;
       const maxRowsInAnyCol = Math.max(1, ...columns.map(c => c.length));
       const colEls = columns.map((colNodes, colIdx) => {{
         const cards = colNodes.map((n, rowIdx) => {{
@@ -3086,26 +3466,21 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
             className: "dbt-dag-node" + (isFocus ? " focus" : ""),
             "data-uid": n.unique_id,
             "data-rtype": n.resource_type,
-            title: n.unique_id + (isFocus ? " (Selected resource)" : " — Click to focus lineage"),
+            title: n.resource_type === "test"
+              ? ("dbt Test: " + n.unique_id)
+              : (n.unique_id + " — Click to view model details (last run, tests & SQL)"),
             onMouseenter: () => applyHoverHighlight(n.unique_id),
             onMouseleave: () => applyHoverHighlight(""),
             onClick: () => {{
-              if (isFocus) return;
+              if (didDragPan) {{
+                didDragPan = false;
+                return;
+              }}
               if (n.resource_type === "test") {{
                 showToast("dbt Test: " + n.name + " (" + n.unique_id + ")");
                 return;
               }}
-              if (deepDives[n.unique_id]) {{
-                focusUniqueId = n.unique_id;
-                render();
-              }} else {{
-                dispatchAction(
-                  "dbt_deep_dive_model",
-                  {{ unique_id: n.unique_id, subtab: "lineage", orientation: lineageOrient, confirmed_in_gui: false }},
-                  "Tracing Lineage: " + n.name,
-                  "Fetching multi-hop dbt Platform lineage & node metadata..."
-                );
-              }}
+              openResourceDetail(n.unique_id, n.name);
             }}
           }}, [
             makeDbtResBadge(n.resource_type, n.unique_id),
@@ -3132,6 +3507,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
       viewport.addEventListener("mousedown", ev => {{
         if (ev.target && ev.target.closest && ev.target.closest(".dbt-dag-node")) return;
         isPanning = true;
+        didDragPan = false;
         panStartX = ev.clientX || 0;
         panStartY = ev.clientY || 0;
         scrollStartLeft = viewport.scrollLeft || 0;
@@ -3140,8 +3516,11 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
       }});
       viewport.addEventListener("mousemove", ev => {{
         if (!isPanning) return;
-        viewport.scrollLeft = scrollStartLeft - ((ev.clientX || 0) - panStartX);
-        viewport.scrollTop = scrollStartTop - ((ev.clientY || 0) - panStartY);
+        const dx = (ev.clientX || 0) - panStartX;
+        const dy = (ev.clientY || 0) - panStartY;
+        if (Math.abs(dx) > 4 || Math.abs(dy) > 4) didDragPan = true;
+        viewport.scrollLeft = scrollStartLeft - dx;
+        viewport.scrollTop = scrollStartTop - dy;
       }});
       const stopPan = () => {{
         if (isPanning) {{
@@ -3282,13 +3661,15 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
         if (hoveredUid) applyHoverHighlight(hoveredUid);
       }};
 
-      // Resource Type Filter Chips (SED, MDL, SEM, TST, SRC, MTR, EXP, SNP)
+      // Resource Type Filter Chips (SED, MDL, SEM, TST, SRC, MTR, EXP, SNP — TST off by default)
       const typeChips = presentTypes.map(rt => {{
         const meta = DBT_RES_META[rt] || DBT_RES_META.model;
         const isOff = Boolean(lineageHiddenTypes[rt]);
         return el("button", {{
           type: "button",
           className: "dbt-type-filter-chip" + (isOff ? " off" : ""),
+          "data-rtype-chip": rt,
+          "aria-pressed": String(!isOff),
           title: (isOff ? "Show " : "Hide ") + meta.label + " in lineage graph (0ms)",
           onClick: () => {{
             lineageHiddenTypes[rt] = !lineageHiddenTypes[rt];
@@ -3296,7 +3677,8 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
           }}
         }}, [
           el("span", {{ className: "dbt-type-dot", style: "background:" + meta.bg + ";" }}),
-          el("span", {{ text: meta.code + " (" + typeCounts[rt] + ")" }})
+          el("span", {{ text: meta.code + " (" + typeCounts[rt] + ")" }}),
+          !isOff ? makeIcon("check", 11) : null
         ]);
       }});
 
@@ -3324,11 +3706,17 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
         }})
       ]);
 
+      const hiddenTestCount = lineageHiddenTypes.test ? Number(typeCounts.test || 0) : 0;
       container.appendChild(el("div", {{ className: "card" }}, [
         el("div", {{ className: "row-between" }}, [
           el("div", null, [
             el("div", {{ style: "font-weight:800;font-size:14.5px;", text: "dbt Platform Lineage Graph" }}),
-            el("div", {{ style: "font-size:11.8px;color:var(--muted);", text: visNodes.size + " resources · " + dagEdgesClean.length + " dependencies · Hover to highlight path, click any node to refocus" }})
+            el("div", {{
+              style: "font-size:11.8px;color:var(--muted);",
+              text: visNodes.size + " visible resources · " + dagEdgesClean.length + " dependencies" +
+                    (hiddenTestCount > 0 ? (" · " + hiddenTestCount + " tests hidden (toggle TST chip)") : "") +
+                    " · Hover to highlight path, click any model for details"
+            }})
           ]),
           el("div", {{ style: "display:flex;align-items:center;gap:6px;flex-wrap:wrap;" }}, [
             zoomControls,
@@ -3342,7 +3730,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
             }}, isTD ? "rows" : "columns", isTD ? "Top-Down" : "Left-to-Right")
           ])
         ]),
-        presentTypes.length > 1 ? el("div", {{ className: "chip-bar" }}, typeChips) : null,
+        presentTypes.length > 0 ? el("div", {{ className: "chip-bar" }}, typeChips) : null,
         viewport
       ]));
 
@@ -3392,6 +3780,19 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
           el("div", {{ className: "row-between" }}, [
             iconBtn({{ type: "button", className: "btn btn-sm", onClick: () => {{ catalogViewMode = "list"; render(); }} }}, "arrow-left", "All Resources (" + allRes.length + ")"),
             el("div", {{ style: "display:flex;gap:6px;flex-wrap:wrap;" }}, [
+              catalogSubtab !== "lineage" ? iconBtn({{
+                type: "button",
+                className: "btn btn-sm",
+                title: "Open dbt Platform Lineage Graph centered on " + item.name,
+                onClick: () => {{
+                  if (dd) {{ catalogSubtab = "lineage"; render(); }}
+                  else openResourceLineage(item.unique_id, item.name);
+                }}
+              }}, "git-branch", "View Lineage" + (linNodeCount ? " (" + linNodeCount + ")" : "")) : iconBtn({{
+                type: "button",
+                className: "btn btn-sm",
+                onClick: () => {{ catalogSubtab = "overview"; render(); }}
+              }}, "activity", "Model Details"),
               item.ref_snippet ? iconBtn({{ type: "button", className: "btn btn-sm", onClick: () => openInSqlRunner(item.ref_snippet) }}, "terminal", "Query in SQL Runner") : null,
               (item.kind === "mart" || item.kind === "model" || item.kind === "seed") && defaultJobId ? iconBtn({{
                 type: "button",
@@ -3409,8 +3810,9 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
             makeDbtResBadge((dd && dd.resource_type) || item.kind, item.unique_id),
             el("div", {{ style: "min-width:0;flex:1;" }}, [
               el("div", {{ style: "display:flex;gap:6px;align-items:center;flex-wrap:wrap;" }}, [
-                el("span", {{ className: statusPillClass(item.status_badge || item.kind), text: String(item.status_badge || item.kind).toUpperCase() }}),
+                el("span", {{ className: statusPillClass((dd && dd.last_run_status) || item.status_badge || item.kind), text: String((dd && dd.last_run_status) || item.status_badge || item.kind).toUpperCase() }}),
                 (dd && dd.materialization) || item.materialization ? el("span", {{ className: "pill pill-neutral", text: "Materialized: " + ((dd && dd.materialization) || item.materialization) }}) : null,
+                (dd && dd.last_run_at) ? el("span", {{ className: "pill pill-neutral", style: "font-family:var(--mono);", text: "Last Run: " + dd.last_run_at }}) : null,
                 dd ? el("span", {{ className: "pill pill-ok", text: "Deep-Dive Loaded" }}) : null
               ]),
               el("h2", {{ style: "font-size:17px;font-weight:800;margin-top:4px;font-family:var(--mono);", text: item.name }}),
@@ -3419,7 +3821,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
             ])
           ]),
           el("div", {{ className: "seg-bar", style: "padding-top:4px;border-top:1px solid var(--border);" }}, [
-            ["overview", "Overview & Health"],
+            ["overview", "Model Details (Run, Tests & SQL)"],
             ["lineage", "Lineage Graph" + (linNodeCount ? " (" + linNodeCount + ")" : "")],
             ["sql", "Columns & SQL" + (dd && dd.columns ? " (" + dd.columns.length + ")" : "")]
           ].map(([k, lbl]) =>
@@ -3446,25 +3848,135 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
         if (catalogSubtab === "overview") {{
           const hEntries = dd.health_kv ? Object.entries(dd.health_kv) : [];
           const perf = Array.isArray(dd.performance) ? dd.performance : [];
+          const cols = Array.isArray(dd.columns) ? dd.columns : [];
           const maxSec = Math.max(1, ...perf.map(p => Number(p.execution_seconds) || 0));
+
+          const lastRunTime = String(dd.last_run_at || (perf[0] && perf[0].completed_at) || "");
+          const lastRunStatus = String(dd.last_run_status || (perf[0] && perf[0].status) || item.status_badge || "tracked");
+          const lastExecVal = Number(dd.last_execution_seconds || (perf[0] && perf[0].execution_seconds) || 0);
+          const targetSchema = (dd.database ? dd.database + "." : "") + (dd.schema || "default");
+
+          // Gather attached tests (from backend `attached_tests` + fallback scan of direct lineage test nodes)
+          let attachedTests = Array.isArray(dd.attached_tests) ? [...dd.attached_tests] : [];
+          if (!attachedTests.length) {{
+            const seenT = new Set();
+            const dEdges = Array.isArray(dd.dag_edges) ? dd.dag_edges : [];
+            const dNodes = Array.isArray(dd.dag_nodes) ? dd.dag_nodes : [];
+            const dMap = new Map(dNodes.map(n => [n.unique_id, n]));
+            dEdges.forEach(e => {{
+              const candId = e.source === dd.unique_id ? e.target : (e.target === dd.unique_id ? e.source : "");
+              const cand = candId ? dMap.get(candId) : null;
+              if (cand && normalizeResType(cand.resource_type, cand.unique_id) === "test" && !seenT.has(cand.unique_id)) {{
+                seenT.add(cand.unique_id);
+                attachedTests.push({{ unique_id: cand.unique_id, name: cand.name, status: "configured" }});
+              }}
+            }});
+            (Array.isArray(dd.downstream) ? dd.downstream : []).forEach(dn => {{
+              if (dn && normalizeResType(dn.resource_type, dn.unique_id) === "test" && !seenT.has(dn.unique_id)) {{
+                seenT.add(dn.unique_id);
+                attachedTests.push({{ unique_id: dn.unique_id, name: dn.name, status: "configured" }});
+              }}
+            }});
+          }}
+          const totalDagTests = (Array.isArray(dd.dag_nodes) ? dd.dag_nodes : []).filter(n => normalizeResType(n.resource_type, n.unique_id) === "test").length;
+
+          // 1. Last Run, Execution Trends & Health Card
           container.appendChild(el("div", {{ className: "card" }}, [
-            el("div", {{ style: "font-weight:800;font-size:14.5px;", text: "Health, Freshness & Execution Trends" }}),
+            el("div", {{ style: "font-weight:800;font-size:14.5px;", text: "Last Run, Health & Execution History" }}),
+            el("div", {{ className: "detail-kpi-grid" }}, [
+              el("div", {{ className: "detail-kpi-box" }}, [
+                el("span", {{ className: "detail-kpi-lbl", text: "Last Time Run" }}),
+                el("span", {{ className: "detail-kpi-val", text: lastRunTime || "Not yet recorded" }})
+              ]),
+              el("div", {{ className: "detail-kpi-box" }}, [
+                el("span", {{ className: "detail-kpi-lbl", text: "Last Build Status" }}),
+                el("div", null, [el("span", {{ className: statusPillClass(lastRunStatus), text: lastRunStatus.toUpperCase() }})])
+              ]),
+              el("div", {{ className: "detail-kpi-box" }}, [
+                el("span", {{ className: "detail-kpi-lbl", text: "Execution Duration" }}),
+                el("span", {{ className: "detail-kpi-val", text: lastExecVal > 0 ? (lastExecVal + "s") : "—" }})
+              ]),
+              el("div", {{ className: "detail-kpi-box" }}, [
+                el("span", {{ className: "detail-kpi-lbl", text: "Warehouse Schema" }}),
+                el("span", {{ className: "detail-kpi-val", text: targetSchema }})
+              ])
+            ]),
             ...(hEntries.length ? hEntries.map(([k, v]) => el("div", {{ className: "row-between", style: "padding:5px 0;border-bottom:1px solid var(--border);font-size:12.5px;" }}, [
               el("span", {{ style: "color:var(--muted);font-weight:600;", text: k }}),
               el("span", {{ style: "font-family:var(--mono);", text: String(v) }})
-            ])) : [
-              dd.health_text
-                ? el("pre", {{ className: "code-box", text: dd.health_text }})
-                : el("div", {{ style: "font-size:12.5px;color:var(--secondary);", text: "Schema: " + (dd.database ? dd.database + "." : "") + (dd.schema || "default") + " · Upstream: " + (dd.upstream || []).length + " · Downstream: " + (dd.downstream || []).length }})
-            ]),
-            perf.length > 0 ? el("div", {{ style: "margin-top:8px;display:flex;flex-direction:column;gap:5px;" }}, [
-              el("div", {{ style: "font-size:12px;font-weight:700;color:var(--secondary);", text: "Recent Execution Duration Trend (" + perf.length + " runs)" }}),
+            ])) : (dd.health_text ? [el("pre", {{ className: "code-box", text: dd.health_text }})] : [])),
+            perf.length > 0 ? el("div", {{ style: "margin-top:4px;display:flex;flex-direction:column;gap:5px;" }}, [
+              el("div", {{ style: "font-size:12px;font-weight:700;color:var(--secondary);", text: "Recent Execution History (" + perf.length + " runs)" }}),
               ...perf.map(p => el("div", {{ className: "bar-row" }}, [
-                el("span", {{ className: statusPillClass(p.status), text: p.status }}),
+                el("span", {{ className: statusPillClass(p.status), text: String(p.status || "success").toUpperCase() }}),
+                p.completed_at ? el("span", {{ style: "font-family:var(--mono);font-size:11px;color:var(--muted);white-space:nowrap;", text: p.completed_at }}) : null,
                 el("div", {{ className: "bar-track" }}, [el("div", {{ className: "bar-fill", style: "width:" + Math.max(5, Math.round(((Number(p.execution_seconds) || 0) / maxSec) * 100)) + "%;" }})]),
-                el("span", {{ style: "font-family:var(--mono);font-size:11.5px;", text: p.execution_seconds + "s" }})
+                el("span", {{ style: "font-family:var(--mono);font-size:11.5px;min-width:44px;text-align:right;", text: p.execution_seconds + "s" }})
               ]))
             ]) : null
+          ]));
+
+          // 2. Attached Model Tests Card
+          container.appendChild(el("div", {{ className: "card" }}, [
+            el("div", {{ className: "row-between" }}, [
+              el("div", {{ style: "display:flex;align-items:center;gap:8px;" }}, [
+                makeDbtResBadge("test", "test." + item.name),
+                el("div", null, [
+                  el("div", {{ style: "font-weight:800;font-size:14.5px;", text: "Model Tests (" + attachedTests.length + ")" }}),
+                  el("div", {{ style: "font-size:11.8px;color:var(--muted);", text: attachedTests.length > 0 ? "Schema & data assertions attached to " + item.name : "No direct tests attached to " + item.name }})
+                ])
+              ]),
+              el("div", {{ style: "display:flex;gap:6px;flex-wrap:wrap;" }}, [
+                (attachedTests.length > 0 || totalDagTests > 0) ? iconBtn({{
+                  type: "button",
+                  className: "btn btn-sm",
+                  onClick: () => {{
+                    lineageHiddenTypes.test = false;
+                    catalogSubtab = "lineage";
+                    render();
+                  }}
+                }}, "git-branch", "Show Tests in Lineage") : null,
+                (item.kind === "mart" || item.kind === "model" || item.kind === "seed") && defaultJobId ? iconBtn({{
+                  type: "button",
+                  className: "btn btn-sm",
+                  onClick: () => openTriggerModal(defaultJobId, "dbt test --select " + item.name, "Run dbt tests for " + item.name)
+                }}, "play", "Run dbt test") : null
+              ])
+            ]),
+            ...(attachedTests.length > 0 ? attachedTests.slice(0, 15).map(t => el("div", {{
+              className: "row-between",
+              style: "padding:6px 8px;background:var(--subtle);border:1px solid var(--border);border-radius:8px;font-size:12px;"
+            }}, [
+              el("span", {{ style: "font-family:var(--mono);font-weight:600;word-break:break-word;", text: t.name || t.unique_id }}),
+              el("span", {{ className: statusPillClass(t.status || "pass"), text: String(t.status || "configured").toUpperCase() }})
+            ])) : [
+              el("div", {{ style: "font-size:12.5px;color:var(--muted);", text: "No schema or custom data tests were found directly attached to this resource." }})
+            ])
+          ]));
+
+          // 3. SQL Definition & Columns Card (visible directly on the detail page)
+          const sqlStr = codeMode === "compiled" ? (dd.compiled_sql || dd.raw_sql) : (dd.raw_sql || dd.compiled_sql);
+          container.appendChild(el("div", {{ className: "card" }}, [
+            el("div", {{ className: "row-between" }}, [
+              el("div", {{ style: "font-weight:800;font-size:14.5px;", text: "SQL Definition & Columns (" + cols.length + ")" }}),
+              el("div", {{ style: "display:flex;gap:6px;flex-wrap:wrap;" }}, [
+                (dd.compiled_sql || dd.raw_sql) ? el("button", {{ type: "button", className: "btn btn-sm" + (codeMode === "compiled" ? " btn-navy" : ""), text: "Compiled SQL", onClick: () => {{ codeMode = "compiled"; render(); }} }}) : null,
+                (dd.compiled_sql || dd.raw_sql) ? el("button", {{ type: "button", className: "btn btn-sm" + (codeMode === "raw" ? " btn-navy" : ""), text: "Raw Jinja", onClick: () => {{ codeMode = "raw"; render(); }} }}) : null,
+                cols.length > 12 ? el("button", {{ type: "button", className: "btn btn-sm", text: "All " + cols.length + " Columns", onClick: () => {{ catalogSubtab = "sql"; render(); }} }}) : null
+              ])
+            ]),
+            sqlStr
+              ? el("pre", {{ className: "code-box", text: sqlStr }})
+              : (dd.fallback_text
+                  ? el("pre", {{ className: "code-box", text: dd.fallback_text }})
+                  : (item.ref_snippet ? el("pre", {{ className: "code-box", text: "SELECT *\\nFROM " + item.ref_snippet + "\\nLIMIT 25" }}) : null)),
+            ...cols.slice(0, 12).map(c => el("div", {{ className: "row-between", style: "padding:4px 0;border-bottom:1px solid var(--border);font-size:12px;" }}, [
+              el("div", null, [
+                el("span", {{ style: "font-family:var(--mono);font-weight:700;", text: c.name }}),
+                c.description ? el("span", {{ style: "color:var(--muted);margin-left:8px;", text: c.description }}) : null
+              ]),
+              el("span", {{ className: "pill pill-neutral", text: c.type }})
+            ]))
           ]));
         }} else if (catalogSubtab === "lineage") {{
           renderDbtPlatformLineage(container, dd, deepDives);
@@ -3523,7 +4035,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
           const isCached = Boolean(deepDives[item.unique_id]);
           return el("div", {{
             className: "queue-item",
-            onClick: () => {{ focusUniqueId = item.unique_id; catalogViewMode = "detail"; render(); }}
+            onClick: () => {{ focusUniqueId = item.unique_id; catalogViewMode = "detail"; catalogSubtab = "overview"; render(); }}
           }}, [
             el("div", {{ style: "display:flex;align-items:center;gap:10px;min-width:0;flex:1;" }}, [
               makeDbtResBadge(item.kind, item.unique_id),
@@ -3536,7 +4048,13 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
                 item.description ? el("div", {{ style: "font-size:12px;color:var(--secondary);margin-top:2px;", text: item.description }}) : el("div", {{ style: "font-size:11.5px;color:var(--muted);font-family:var(--mono);", text: item.unique_id }})
               ])
             ]),
-            el("div", {{ style: "display:flex;gap:6px;align-items:center;" }}, [
+            el("div", {{ style: "display:flex;gap:6px;align-items:center;flex-wrap:wrap;" }}, [
+              iconBtn({{
+                type: "button",
+                className: "btn btn-sm",
+                title: "Open " + item.name + " in dbt Platform Lineage Graph",
+                onClick: ev => {{ ev.stopPropagation(); openResourceLineage(item.unique_id, item.name); }}
+              }}, "git-branch", "Lineage"),
               item.ref_snippet ? iconBtn({{
                 type: "button",
                 className: "btn btn-sm",
@@ -3544,14 +4062,52 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
                 onClick: ev => {{ ev.stopPropagation(); openInSqlRunner(item.ref_snippet); }}
               }}, "terminal", "SQL") : null,
               el("span", {{ style: "display:inline-flex;align-items:center;gap:4px;font-weight:700;color:var(--primary);font-size:12px;" }}, [
-                el("span", {{ text: "Inspect" }}),
+                el("span", {{ text: "Details" }}),
                 makeIcon("arrow-right", 13)
               ])
             ])
           ]);
-        }}) : [el("div", {{ style: "font-size:12.5px;color:var(--muted);padding:8px 2px;", text: "No resources match this local filter. Try 'AI Semantic Search' for broader discovery." }})]));
+        }}) : [
+          catalogKindFilter === "semantic_model"
+            ? makeSemanticEmptyCallout("")
+            : el("div", {{ style: "font-size:12.5px;color:var(--muted);padding:8px 2px;", text: "No resources match this local filter. Try 'AI Semantic Search' for broader discovery." }})
+        ]));
       }}
       renderCatalogItemsOnly();
+
+      const semResults = Array.isArray(STATE.semantic_search_results) ? STATE.semantic_search_results : [];
+      if (semResults.length > 0) {{
+        container.appendChild(el("div", {{ className: "card" }}, [
+          el("div", {{ className: "row-between" }}, [
+            el("div", {{ style: "font-weight:800;font-size:14px;", text: "AI Semantic Search Matches" + (STATE.semantic_search_query ? (" — '" + STATE.semantic_search_query + "'") : "") }}),
+            el("button", {{ type: "button", className: "btn btn-sm", text: "Clear", onClick: () => {{ STATE.semantic_search_results = []; render(); }} }})
+          ]),
+          el("div", {{ className: "queue-list" }}, semResults.slice(0, 8).map(sr => el("div", {{
+            className: "queue-item",
+            onClick: () => openResourceDetail(sr.unique_id, sr.name)
+          }}, [
+            el("div", {{ style: "display:flex;align-items:center;gap:10px;min-width:0;flex:1;" }}, [
+              makeDbtResBadge("model", sr.unique_id),
+              el("div", {{ style: "min-width:0;flex:1;" }}, [
+                el("div", {{ style: "font-weight:800;font-family:var(--mono);", text: sr.name }}),
+                sr.description ? el("div", {{ style: "font-size:12px;color:var(--secondary);", text: sr.description }}) : null
+              ])
+            ]),
+            el("div", {{ style: "display:flex;gap:6px;align-items:center;" }}, [
+              iconBtn({{
+                type: "button",
+                className: "btn btn-sm",
+                onClick: ev => {{ ev.stopPropagation(); openResourceLineage(sr.unique_id, sr.name); }}
+              }}, "git-branch", "Lineage"),
+              iconBtn({{
+                type: "button",
+                className: "btn btn-sm",
+                onClick: ev => {{ ev.stopPropagation(); openResourceDetail(sr.unique_id, sr.name); }}
+              }}, null, "Details", "arrow-right")
+            ])
+          ])))
+        ]));
+      }}
 
       const attnCount = sources.filter(s => s.status_bucket === "error" || s.status_bucket === "warn").length;
       container.appendChild(el("div", {{ className: "card" }}, [
@@ -3565,7 +4121,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
           ["model", "Models (" + models.length + ")"],
           ...(seeds.length > 0 ? [["seed", "Seeds (" + seeds.length + ")"]] : []),
           ["source", "Sources (" + sources.length + ")"],
-          ...(semModels.length > 0 ? [["semantic_model", "Semantic Models (" + semModels.length + ")"]] : []),
+          ["semantic_model", "Semantic Models (" + semModels.length + ")"],
           ["exposure", "Exposures (" + exposures.length + ")"],
           ...(attnCount > 0 ? [["attention", "Needs Attention (" + attnCount + ")"]] : [])
         ].map(([k, lbl]) =>
@@ -3662,7 +4218,7 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
           }}, "play", "Run Metric Slice", "arrow-right")
         ]));
       }} else {{
-        sliceCard.appendChild(el("div", {{ className: "banner banner-warn", text: mv.error || "No Semantic Layer metrics were returned for this project." }}));
+        sliceCard.appendChild(makeSemanticEmptyCallout(mv.error || ""));
       }}
       container.appendChild(sliceCard);
 
@@ -3779,9 +4335,10 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
             if (!sqlArea.value.trim()) {{ showToast("SQL query cannot be empty."); return; }}
             confirmModal = {{
               title: "Confirm Warehouse SQL Execution",
-              warning: "Executes this dbt Jinja / SQL query against your connected data warehouse.",
+              warning: "Executes this dbt Jinja / SQL query against your connected data warehouse using your personal dbt Platform Development Credentials (the agent may prompt for 'Allow' in Chat).",
               rows: [
                 {{ label: "dbt Project", value: STATE.active_project_name || String(STATE.active_project_id || "") }},
+                {{ label: "MCP Tool", value: "execute_sql (Development Environment)" }},
                 {{ label: "SQL Query", value: sqlArea.value.slice(0, 260) }}
               ],
               payload: {{ operation: "execute_sql", sql: sqlArea.value, confirmed_in_gui: true, execute: true }}
@@ -3790,6 +4347,32 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
           }} }}, "play", "Review & Execute Warehouse SQL", "arrow-right")
         ])
       ]));
+
+      if (sv.sql_error) {{
+        const projRef = STATE.active_project_name || String(STATE.active_project_id || "this project");
+        container.appendChild(el("div", {{
+          className: "card",
+          style: "border-color:var(--warn-border);background:var(--warn-bg);gap:9px;"
+        }}, [
+          el("div", {{ className: "row-between" }}, [
+            el("div", {{ style: "display:flex;align-items:center;gap:8px;min-width:0;" }}, [
+              el("span", {{ style: "color:var(--warn-text);flex-shrink:0;" }}, [makeIcon("alert", 17)]),
+              el("div", {{ style: "font-weight:800;font-size:14px;color:var(--warn-text);", text: "Warehouse SQL Failed — Configure Development Credentials in dbt Platform" }})
+            ]),
+            el("button", {{
+              type: "button",
+              className: "btn btn-sm",
+              text: "Dismiss",
+              onClick: () => {{ sv.sql_error = ""; sv.sql_credentials_hint = ""; render(); }}
+            }})
+          ]),
+          el("div", {{
+            style: "font-size:12.6px;line-height:1.48;color:var(--text);",
+            text: sv.sql_credentials_hint || ("To run queries with execute_sql, you need to configure your personal Development Credentials inside dbt Platform (Account / Profile Settings -> Credentials -> select '" + projRef + "' -> save your warehouse development credentials) and ensure a Development Environment is configured.")
+          }}),
+          el("pre", {{ className: "code-box", style: "max-height:150px;", text: sv.sql_error }})
+        ]));
+      }}
 
       if (qRows.length > 0 || sv.query_text) {{
         const cols = qRows.length > 0 ? Object.keys(qRows[0]) : [];
@@ -3832,7 +4415,16 @@ def render_dbt_workbench_html(sc: dict[str, Any]) -> str:
               el("div", {{ style: "font-weight:700;font-family:var(--mono);", text: it.name }}),
               el("div", {{ style: "font-size:12px;color:var(--muted);", text: it.description || it.package || it.unique_id || "" }})
             ]),
-            el("div", {{ style: "display:flex;gap:6px;align-items:center;" }}, [
+            el("div", {{ style: "display:flex;gap:6px;align-items:center;flex-wrap:wrap;" }}, [
+              pickerKind !== "macro" ? iconBtn({{
+                type: "button",
+                className: "btn btn-sm",
+                title: "Open " + it.name + " in Lineage Graph",
+                onClick: ev => {{
+                  ev.stopPropagation();
+                  openResourceLineage(it.unique_id || it.name, it.name);
+                }}
+              }}, "git-branch", "Lineage") : null,
               pickerKind !== "macro" ? el("button", {{ type: "button", className: "btn btn-sm", text: "Count(*)", onClick: ev => {{
                 ev.stopPropagation();
                 sqlEditorText = "SELECT COUNT(*) AS row_count\\nFROM " + snip;
@@ -4161,6 +4753,7 @@ def handle_open_or_deep_dive(args: argparse.Namespace, command_mode: str = "open
                 unique_id=getattr(args, "unique_id", ""),
                 search_query=getattr(args, "query", ""),
                 orientation=getattr(args, "orientation", ""),
+                subtab=getattr(args, "subtab", ""),
             )
         if getattr(args, "metric", ""):
             deep_dive_metric_slice(
@@ -4325,13 +4918,38 @@ def handle_decide_command(args: argparse.Namespace) -> dict[str, Any]:
         sql_clean = (args.sql or "").strip()
         if not sql_clean:
             raise CliError("SQL query cannot be empty.")
-        raw_exec, txt_exec = gw.call("execute_sql", {"project_id": pid, "sql": sql_clean[:4000]})
-        rows = extract_items(raw_exec, ("rows", "data", "items", "results"))
         state["active_tab"] = 4
         sv = state.setdefault("sql_view", {})
         sv["generated_sql"] = sql_clean[:3500]
+        try:
+            raw_exec, txt_exec = gw.call("execute_sql", {"project_id": pid, "sql": sql_clean[:4000]})
+        except Exception as exc:
+            err_msg = mask_pii(str(exc)[:900])
+            cred_hint = (
+                "To use execute_sql, configure your personal Development Credentials inside dbt Platform "
+                "(Account / Profile Settings -> Credentials -> select this project -> save your warehouse development credentials) "
+                "and verify a Development Environment exists for this project."
+            )
+            sv["query_rows"] = []
+            sv["query_text"] = ""
+            sv["sql_error"] = err_msg
+            sv["sql_credentials_hint"] = cred_hint
+            state["banner"] = {
+                "kind": "warn",
+                "title": "Warehouse SQL Execution Failed — Configure Development Credentials in dbt Platform",
+                "detail": cred_hint,
+            }
+            return stage_a2ui_canvas(
+                state,
+                card_title="dbt Cloud Workbench",
+                card_description="Warehouse SQL requires Development Credentials configured in dbt Platform",
+            )
+
+        rows = extract_items(raw_exec, ("rows", "data", "items", "results"))
         sv["query_rows"] = rows[:50]
         sv["query_text"] = txt_exec[:2500]
+        sv["sql_error"] = ""
+        sv["sql_credentials_hint"] = ""
         state["banner"] = {
             "kind": "ok",
             "title": "Warehouse SQL Executed",
@@ -4374,6 +4992,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_open.add_argument("--group-dim", default="__keep__")
     p_open.add_argument("--unique-id", default="")
     p_open.add_argument("--query", default="")
+    p_open.add_argument("--subtab", default="")
     p_open.add_argument("--orientation", default="")
     p_open.add_argument("--job-id", default="")
     p_open.add_argument("--run-id", default="")
