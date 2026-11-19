@@ -1,0 +1,297 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900">
+  <defs>
+    <style>
+      .font-sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+      .font-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    </style>
+    <linearGradient id="headerGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#0B192C" />
+      <stop offset="55%" stop-color="#132A46" />
+      <stop offset="100%" stop-color="#1A365D" />
+    </linearGradient>
+    <linearGradient id="googleBlue" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#E8F0FE" />
+      <stop offset="100%" stop-color="#F8FAFF" />
+    </linearGradient>
+    <linearGradient id="dbtTint" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFF5F2" />
+      <stop offset="100%" stop-color="#FFFFFF" />
+    </linearGradient>
+    <filter id="cardShadow" x="-4%" y="-4%" width="108%" height="110%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#0F172A" flood-opacity="0.07" />
+    </filter>
+    <marker id="arrowBlue" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="#1A73E8" />
+    </marker>
+    <marker id="arrowOrange" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="#FF6849" />
+    </marker>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="#0F9D58" />
+    </marker>
+    <marker id="arrowSlate" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="#475569" />
+    </marker>
+  </defs>
+
+  <!-- Slide Canvas Background -->
+  <rect width="1600" height="900" fill="#F4F6FA" />
+
+  <!-- Subtle Dot Grid -->
+  <pattern id="dotGrid" width="24" height="24" patternUnits="userSpaceOnUse">
+    <circle cx="2" cy="2" r="1" fill="#CBD5E1" opacity="0.55" />
+  </pattern>
+  <rect x="0" y="88" width="1600" height="760" fill="url(#dotGrid)" />
+
+  <!-- Top Presentation Header Banner -->
+  <rect x="0" y="0" width="1600" height="86" fill="url(#headerGrad)" />
+  <rect x="0" y="83" width="1600" height="3" fill="#FF6849" />
+
+  <!-- Official dbt Mark + Wordmark in Header -->
+  <g transform="translate(36, 20) scale(0.92)">
+    <path d="M5.7 0.9L8.1 0.6L15.0 4.0L16.0 5.0L20.0 7.0L21.0 8.0L25.0 10.0L26.0 11.0L30.0 13.0L31.8 14.4L32.4 14.0L32.4 13.2L31.3 10.7L29.7 9.0L30.0 7.7L38.0 2.7L42.2 0.7L44.1 0.6L47.0 2.0L48.4 3.9L49.2 5.6L48.9 8.1L47.0 12.0L46.0 13.0L44.0 17.0L43.0 18.0L41.6 20.9L41.0 23.1L41.0 26.0L41.6 27.8L43.7 32.0L46.2 35.8L49.3 42.2L49.2 43.4L48.3 45.2L45.3 48.1L43.1 48.4L40.9 47.8L40.0 47.0L36.0 45.0L35.0 44.0L29.0 41.0L28.0 40.0L24.0 38.0L23.0 37.0L19.0 35.0L18.6 36.1L18.7 37.0L21.0 40.0L21.1 41.2L8.8 48.3L7.4 48.5L5.1 47.9L3.0 46.0L1.7 44.0L1.6 41.9L5.0 35.1L6.0 34.0L9.0 27.9L10.0 25.0L9.5 22.1L8.7 20.1L1.7 7.8L1.6 6.1L2.2 3.9L4.0 2.0ZM24.0 21.0L21.0 24.0L22.0 26.0L24.0 28.0L25.1 28.6L26.3 28.4L29.3 25.3L29.4 23.9L26.1 20.6L25.1 20.4Z" fill="#FF6849" fill-rule="evenodd" />
+    <path d="M78.7 6.9L79.8 6.5L83.8 6.5L85.1 6.7L85.4 7.2L85.3 39.1L84.2 39.7L79.2 39.6L78.7 39.1L78.5 37.2L77.9 36.8L74.8 39.4L70.2 40.1L67.8 39.4L66.0 39.1L62.7 36.1L61.8 34.8L60.6 31.8L59.9 28.0L59.9 26.0L60.6 22.8L62.9 18.0L65.9 15.7L67.9 14.7L73.2 14.7L76.0 15.9L77.8 17.7L78.2 17.7L78.6 16.8ZM90.7 6.9L92.2 6.5L95.8 6.5L96.5 6.9L96.9 18.3L99.9 15.7L101.9 14.7L104.8 14.5L108.0 14.9L110.0 15.9L113.1 19.0L114.3 20.9L115.3 24.8L115.4 28.8L114.4 33.2L112.5 36.2L112.0 37.1L109.0 39.1L105.0 40.1L103.0 40.1L100.2 39.2L97.1 36.7L96.8 36.9L96.5 39.2L95.8 39.7L91.2 39.7L90.5 39.2L90.3 8.2ZM123.6 7.9L125.8 7.4L126.4 7.8L126.5 13.8L126.9 14.7L131.0 14.9L131.7 16.2L131.7 19.8L131.1 21.0L127.2 21.1L126.5 22.2L126.6 33.2L127.2 33.6L130.1 33.7L131.1 35.0L131.1 39.0L129.8 39.7L123.8 39.4L121.9 38.4L120.7 37.1L119.9 33.8L119.9 22.2L118.8 21.1L116.9 21.0L116.3 19.8L116.3 16.2L116.8 15.2L117.0 14.9L118.8 14.9L120.1 14.3L120.3 10.2L120.7 8.9ZM70.9 20.8L68.9 21.8L67.6 23.8L66.7 26.2L66.8 29.1L67.6 31.2L69.1 33.0L72.2 33.9L74.2 33.6L75.9 33.0L78.0 30.9L78.5 28.8L78.4 25.2L77.5 23.2L76.2 21.6L73.2 20.5ZM100.9 20.8L99.1 22.0L97.9 23.3L97.2 24.8L96.8 28.2L97.8 31.1L99.1 32.7L101.8 33.8L104.2 33.6L105.2 33.5L107.1 32.2L108.4 30.2L108.6 26.2L108.4 24.2L107.0 22.1L105.8 21.4L103.2 20.5Z" fill="#FFFFFF" fill-rule="evenodd" />
+  </g>
+
+  <line x1="176" y1="22" x2="176" y2="64" stroke="#475569" stroke-width="1.5" />
+
+  <text x="196" y="39" class="font-sans" font-size="22" font-weight="800" fill="#FFFFFF">dbt Platform MCP + Google Gemini Enterprise (A2UI v0.9)</text>
+  <text x="196" y="63" class="font-sans" font-size="13.5" font-weight="500" fill="#CBD5E1">Reference Architecture &amp; Core Use Cases — Prefetch-First 0ms Exploration, Lineage &amp; Guarded Action Loop</text>
+
+  <!-- Header Badges (Right) -->
+  <rect x="1165" y="24" width="132" height="34" rx="17" fill="#1E3A5F" stroke="#3B82F6" stroke-width="1.2" />
+  <text x="1231" y="46" text-anchor="middle" class="font-sans" font-size="12" font-weight="700" fill="#93C5FD">A2UI v0.9 Canvas</text>
+
+  <rect x="1309" y="24" width="122" height="34" rx="17" fill="#1E3A5F" stroke="#34D399" stroke-width="1.2" />
+  <text x="1370" y="46" text-anchor="middle" class="font-sans" font-size="12" font-weight="700" fill="#6EE7B7">0ms Local UI</text>
+
+  <rect x="1443" y="24" width="125" height="34" rx="17" fill="#3B1D1A" stroke="#FF6849" stroke-width="1.2" />
+  <text x="1505" y="46" text-anchor="middle" class="font-sans" font-size="12" font-weight="700" fill="#FDBA74">Remote MCP</text>
+
+  <!-- ===================================================================== -->
+  <!-- COLUMN 1: GEMINI ENTERPRISE USER EXPERIENCE (CHAT + 4 A2UI USE CASES) -->
+  <!-- ===================================================================== -->
+  <g filter="url(#cardShadow)">
+    <rect x="28" y="108" width="560" height="726" rx="16" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5" />
+  </g>
+  <rect x="28" y="108" width="560" height="44" rx="16" fill="#E8F0FE" />
+  <rect x="28" y="136" width="560" height="16" fill="#E8F0FE" />
+  <circle cx="52" cy="130" r="8" fill="#1A73E8" />
+  <text x="68" y="135" class="font-sans" font-size="14.5" font-weight="800" fill="#0F172A">1. Google Gemini Enterprise UI (Split-Screen Experience)</text>
+  <text x="572" y="135" text-anchor="end" class="font-mono" font-size="11" font-weight="700" fill="#1A73E8">a2ui.org v0.9</text>
+
+  <!-- Left Pane: Chat & Tool Approval -->
+  <rect x="46" y="166" width="524" height="106" rx="11" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.2" />
+  <rect x="58" y="178" width="118" height="22" rx="6" fill="#DBEAFE" />
+  <text x="117" y="193" text-anchor="middle" class="font-sans" font-size="11" font-weight="800" fill="#1E40AF">LEFT: CHAT PANE</text>
+  <text x="186" y="193" class="font-sans" font-size="12.5" font-weight="700" fill="#0F172A">Conversational Intent &amp; User OAuth / Tool Approval</text>
+  <text x="58" y="217" class="font-sans" font-size="12" fill="#334155">• Natural-language entry: "Check failed dbt runs", "Trace orders lineage", "Query revenue"</text>
+  <text x="58" y="238" class="font-sans" font-size="12" fill="#334155">• Human-in-the-loop "Allow" gate for sensitive tools (e.g., execute_sql, trigger_job_run)</text>
+  <text x="58" y="259" class="font-sans" font-size="12" fill="#475569">• Concise 2-4 bullet executive summary paired with interactive right-hand Canvas</text>
+
+  <!-- Right Pane: A2UI Canvas Container -->
+  <rect x="46" y="286" width="524" height="532" rx="12" fill="url(#dbtTint)" stroke="#FF6849" stroke-width="1.4" />
+  <rect x="58" y="298" width="160" height="22" rx="6" fill="#FFEDE8" />
+  <text x="138" y="313" text-anchor="middle" class="font-sans" font-size="11" font-weight="800" fill="#C2410C">RIGHT: A2UI CANVAS</text>
+  <text x="228" y="313" class="font-sans" font-size="12.5" font-weight="800" fill="#0F172A">Sandboxed IFrameSrcdoc Workbench (CSP connect-src 'none')</text>
+  <text x="58" y="334" class="font-sans" font-size="11.5" fill="#64748B">Instant 0ms tab switching &amp; client-side filtering; Loading Popup prompts user when Chat 'Allow' is needed</text>
+
+  <!-- Use Case 1 Card -->
+  <rect x="60" y="348" width="496" height="104" rx="10" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.2" />
+  <rect x="60" y="348" width="6" height="104" rx="3" fill="#DC2626" />
+  <rect x="78" y="359" width="76" height="20" rx="5" fill="#FEE2E2" />
+  <text x="116" y="373" text-anchor="middle" class="font-sans" font-size="10.5" font-weight="800" fill="#991B1B">TAB 1 · OPS</text>
+  <text x="164" y="374" class="font-sans" font-size="13.5" font-weight="800" fill="#0F172A">Use Case 1: Build Triage, Incident Root-Cause &amp; Job Actions</text>
+  <text x="78" y="396" class="font-sans" font-size="11.8" fill="#334155">• 0ms filter across 40 runs (Failed / Active / Succeeded) + inline Refresh on active runs</text>
+  <text x="78" y="416" class="font-sans" font-size="11.8" fill="#334155">• Pre-hydrated error logs &amp; failed model detection; Deep Dive loads artifacts &amp; dbt Docs</text>
+  <text x="78" y="436" class="font-sans" font-size="11.8" font-weight="600" fill="#C2410C">• Actions: 2-Step Confirmed Safe Retry, Selective Rebuild (+model+), or Cancel Run</text>
+
+  <!-- Use Case 2 Card -->
+  <rect x="60" y="462" width="496" height="114" rx="10" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.2" />
+  <rect x="60" y="462" width="6" height="114" rx="3" fill="#2563EB" />
+  <rect x="78" y="473" width="90" height="20" rx="5" fill="#DBEAFE" />
+  <text x="123" y="487" text-anchor="middle" class="font-sans" font-size="10.5" font-weight="800" fill="#1E40AF">TAB 2 · DAG</text>
+  <text x="178" y="488" class="font-sans" font-size="13.5" font-weight="800" fill="#0F172A">Use Case 2: Catalog Health, Source Freshness &amp; Lineage</text>
+  <!-- Mini dbt Platform Resource Badges -->
+  <g transform="translate(78, 497)">
+    <rect x="0" y="0" width="36" height="16" rx="4" fill="#BFFEAF" /><text x="18" y="11.5" text-anchor="middle" class="font-mono" font-size="9.5" font-weight="800" fill="#14532D">SED</text>
+    <rect x="42" y="0" width="36" height="16" rx="4" fill="#A7F3D0" /><text x="60" y="11.5" text-anchor="middle" class="font-mono" font-size="9.5" font-weight="800" fill="#064E3B">SRC</text>
+    <rect x="84" y="0" width="36" height="16" rx="4" fill="#D6EDFF" /><text x="102" y="11.5" text-anchor="middle" class="font-mono" font-size="9.5" font-weight="800" fill="#1E3A5F">MDL</text>
+    <rect x="126" y="0" width="36" height="16" rx="4" fill="#FFB5C3" /><text x="144" y="11.5" text-anchor="middle" class="font-mono" font-size="9.5" font-weight="800" fill="#4C0519">SEM</text>
+    <rect x="168" y="0" width="36" height="16" rx="4" fill="#FFE4B5" /><text x="186" y="11.5" text-anchor="middle" class="font-mono" font-size="9.5" font-weight="800" fill="#78350F">EXP</text>
+    <rect x="210" y="0" width="76" height="16" rx="4" fill="#F1F5F9" stroke="#CBD5E1" /><text x="248" y="11.5" text-anchor="middle" class="font-mono" font-size="9" font-weight="700" fill="#475569">TST (off)</text>
+  </g>
+  <text x="78" y="532" class="font-sans" font-size="11.8" fill="#334155">• dbt Platform multi-rank Bezier DAG; hover path highlight; Tests hidden by default</text>
+  <text x="78" y="551" class="font-sans" font-size="11.8" fill="#334155">• Click any model in Lineage -&gt; Model Details (Last Run, Attached Tests, Columns &amp; SQL)</text>
+  <text x="78" y="569" class="font-sans" font-size="11.5" fill="#475569">• 1-click Lineage jump from Marts, Sources, Search &amp; Failed Runs + AI Semantic Search</text>
+
+  <!-- Use Case 3 Card -->
+  <rect x="60" y="586" width="496" height="104" rx="10" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.2" />
+  <rect x="60" y="586" width="6" height="104" rx="3" fill="#DB2777" />
+  <rect x="78" y="597" width="92" height="20" rx="5" fill="#FCE7F3" />
+  <text x="124" y="611" text-anchor="middle" class="font-sans" font-size="10.5" font-weight="800" fill="#9D174D">TAB 3 · BI</text>
+  <text x="180" y="612" class="font-sans" font-size="13.5" font-weight="800" fill="#0F172A">Use Case 3: Governed Semantic Layer &amp; MetricFlow Studio</text>
+  <text x="78" y="634" class="font-sans" font-size="11.8" fill="#334155">• Pre-hydrated primary KPI with 0ms toggle: Visual Bars / Data Rows / Compiled SQL</text>
+  <text x="78" y="654" class="font-sans" font-size="11.8" fill="#334155">• On-demand MetricFlow slicing by Time Grain (DAY..YEAR) &amp; governed Dimensions</text>
+  <text x="78" y="674" class="font-sans" font-size="11.5" fill="#475569">• Empty-state build guidance + 1-click Trigger dbt Build to populate Semantic artifacts</text>
+
+  <!-- Use Case 4 Card -->
+  <rect x="60" y="700" width="496" height="104" rx="10" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.2" />
+  <rect x="60" y="700" width="6" height="104" rx="3" fill="#0D9488" />
+  <rect x="78" y="711" width="92" height="20" rx="5" fill="#CCFBF1" />
+  <text x="124" y="725" text-anchor="middle" class="font-sans" font-size="10.5" font-weight="800" fill="#115E59">TAB 4 · SQL</text>
+  <text x="180" y="726" class="font-sans" font-size="13.5" font-weight="800" fill="#0F172A">Use Case 4: Governed Jinja SQL Runner &amp; AI NL-to-SQL</text>
+  <text x="78" y="748" class="font-sans" font-size="11.8" fill="#334155">• 0ms snippet picker for governed {{ ref() }}, {{ source() }} &amp; project {{ macros() }}</text>
+  <text x="78" y="768" class="font-sans" font-size="11.8" fill="#334155">• dbt Copilot text_to_sql generation + 2-step confirmed Warehouse SQL execution</text>
+  <text x="78" y="788" class="font-sans" font-size="11.5" fill="#475569">• Actionable remediation if personal dbt Platform Dev Credentials are not configured</text>
+
+  <!-- ===================================================================== -->
+  <!-- COLUMN 2: GEMINI ENTERPRISE AGENT & PREFETCH SKILL ENGINE (SOBI)      -->
+  <!-- ===================================================================== -->
+  <g filter="url(#cardShadow)">
+    <rect x="650" y="108" width="420" height="726" rx="16" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5" />
+  </g>
+  <rect x="650" y="108" width="420" height="44" rx="16" fill="#FEF3C7" />
+  <rect x="650" y="136" width="420" height="16" fill="#FEF3C7" />
+  <circle cx="674" cy="130" r="8" fill="#D97706" />
+  <text x="690" y="135" class="font-sans" font-size="14.5" font-weight="800" fill="#0F172A">2. Gemini Agent &amp; Skill Runtime (Sandbox)</text>
+
+  <!-- Box 2A: Agent Orchestrator -->
+  <rect x="668" y="166" width="384" height="118" rx="11" fill="url(#googleBlue)" stroke="#93C5FD" stroke-width="1.3" />
+  <text x="684" y="190" class="font-sans" font-size="13.5" font-weight="800" fill="#1E3A8A">Gemini Enterprise (Sobi) Agent + SKILL.md</text>
+  <text x="684" y="212" class="font-sans" font-size="12" fill="#334155">• Self-extracts zero-dependency CLI (/tmp/dbt_a2ui_cli.py)</text>
+  <text x="684" y="232" class="font-sans" font-size="12" fill="#334155">• 1-to-1 Event Router maps a2ui_action -&gt; CLI subcommand</text>
+  <text x="684" y="252" class="font-sans" font-size="12" fill="#334155">• Calls emit_a2ui(surfaceId="dbt_a2ui_workbench") at turn end</text>
+  <text x="684" y="272" class="font-mono" font-size="11" font-weight="700" fill="#1D4ED8">In-place Canvas refresh · Zero tab proliferation</text>
+
+  <!-- Box 2B: Two-Wave Parallel Prefetch + Session Cache -->
+  <rect x="668" y="300" width="384" height="176" rx="11" fill="#F0FDF4" stroke="#86EFAC" stroke-width="1.3" />
+  <rect x="684" y="312" width="142" height="20" rx="5" fill="#DCFCE7" />
+  <text x="755" y="326" text-anchor="middle" class="font-sans" font-size="10.5" font-weight="800" fill="#166534">FAST PATH · PREFETCH</text>
+  <text x="684" y="350" class="font-sans" font-size="13.5" font-weight="800" fill="#14532D">Two-Wave Parallel Prefetch &amp; Local Cache</text>
+  <text x="684" y="372" class="font-sans" font-size="11.8" fill="#334155">• Wave 1 (8x ThreadPool): Projects, Jobs, 40 Runs, Marts,</text>
+  <text x="694" y="390" class="font-sans" font-size="11.8" fill="#334155">All Models, Sources, Exposures, Metrics, Saved Queries, Macros</text>
+  <text x="684" y="411" class="font-sans" font-size="11.8" fill="#334155">• Wave 2 (Parallel): Failed-run errors, multi-mart Lineage</text>
+  <text x="694" y="429" class="font-sans" font-size="11.8" fill="#334155">(with SemanticModel) + Node Details, Primary Metric slice</text>
+  <rect x="684" y="441" width="352" height="24" rx="6" fill="#FFFFFF" stroke="#BBF7D0" />
+  <text x="860" y="457" text-anchor="middle" class="font-mono" font-size="11" font-weight="700" fill="#15803D">/tmp/dbt_a2ui_state_cache.json -&gt; 90% UI actions = 0ms</text>
+
+  <!-- Box 2C: On-Demand Deep Dive & Guarded Mutation Engine -->
+  <rect x="668" y="492" width="384" height="164" rx="11" fill="#FFFBEB" stroke="#FCD34D" stroke-width="1.3" />
+  <rect x="684" y="504" width="176" height="20" rx="5" fill="#FEF3C7" />
+  <text x="772" y="518" text-anchor="middle" class="font-sans" font-size="10.5" font-weight="800" fill="#92400E">ON-DEMAND &amp; GUARDED</text>
+  <text x="684" y="542" class="font-sans" font-size="13.5" font-weight="800" fill="#78350F">Deep-Dive &amp; Bidirectional Approval Gate</text>
+  <text x="684" y="564" class="font-sans" font-size="11.8" fill="#334155">• Extra MCP calls run ONLY on user deep-dive requests:</text>
+  <text x="694" y="582" class="font-sans" font-size="11.5" fill="#475569">uncached lineage, run artifacts/docs, custom slices, NL-to-SQL</text>
+  <text x="684" y="604" class="font-sans" font-size="11.8" fill="#334155">• Mutations require 2-step GUI confirmation modal</text>
+  <text x="694" y="622" class="font-mono" font-size="11" font-weight="700" fill="#B45309">confirmed_in_gui: true -&gt; decide --execute</text>
+  <text x="684" y="643" class="font-sans" font-size="11.5" fill="#475569">• PII masking + strict allow-listed 24-tool MCP gateway</text>
+
+  <!-- Box 2D: GCP Enterprise Connector Bridge -->
+  <rect x="668" y="672" width="384" height="146" rx="11" fill="#F8FAFC" stroke="#94A3B8" stroke-width="1.3" />
+  <text x="684" y="696" class="font-sans" font-size="13.5" font-weight="800" fill="#0F172A">Google Cloud Secure MCP Connector Bridge</text>
+  <text x="684" y="718" class="font-mono" font-size="11.2" font-weight="700" fill="#1E40AF">remote_cli mcp &lt;dataConnector&gt; &lt;tool&gt;</text>
+  <text x="684" y="740" class="font-sans" font-size="11.8" fill="#334155">• Agent Workload Identity + Outbound OAuth / PAT injection</text>
+  <text x="684" y="760" class="font-sans" font-size="11.8" fill="#334155">• Auto-discovers portable GCP dataConnector &amp; dbt endpoint</text>
+  <text x="684" y="780" class="font-sans" font-size="11.8" fill="#334155">• Schema-safe retry guard for strict FastMCP validation</text>
+  <text x="684" y="802" class="font-mono" font-size="10.8" fill="#64748B">projects/&lt;NUM&gt;/locations/global/collections/.../dataConnector</text>
+
+  <!-- ===================================================================== -->
+  <!-- COLUMN 3: dbt PLATFORM REMOTE MCP & CLOUD DATA WAREHOUSE              -->
+  <!-- ===================================================================== -->
+  <g filter="url(#cardShadow)">
+    <rect x="1132" y="108" width="440" height="726" rx="16" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5" />
+  </g>
+  <rect x="1132" y="108" width="440" height="44" rx="16" fill="#FFEDE8" />
+  <rect x="1132" y="136" width="440" height="16" fill="#FFEDE8" />
+  <circle cx="1156" cy="130" r="8" fill="#FF6849" />
+  <text x="1172" y="135" class="font-sans" font-size="14.5" font-weight="800" fill="#0F172A">3. dbt Platform Remote MCP &amp; Warehouse</text>
+
+  <!-- Endpoint Pill -->
+  <rect x="1150" y="164" width="404" height="32" rx="8" fill="#0F172A" />
+  <text x="1352" y="185" text-anchor="middle" class="font-mono" font-size="12" font-weight="700" fill="#FDBA74">HTTPS · https://&lt;dbt-host&gt;/api/ai/v1/mcp</text>
+
+  <!-- Box 3A: Admin & Job Orchestration APIs -->
+  <rect x="1150" y="208" width="404" height="142" rx="11" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.3" />
+  <rect x="1164" y="220" width="174" height="20" rx="5" fill="#E2E8F0" />
+  <text x="1251" y="234" text-anchor="middle" class="font-sans" font-size="10.5" font-weight="800" fill="#334155">ADMIN &amp; ORCHESTRATION</text>
+  <text x="1164" y="258" class="font-sans" font-size="13" font-weight="800" fill="#0F172A">dbt Cloud Admin API Toolset</text>
+  <text x="1164" y="279" class="font-mono" font-size="11" fill="#334155">list_projects · list_jobs · list_jobs_runs</text>
+  <text x="1164" y="298" class="font-mono" font-size="11" fill="#334155">get_job_run_details · get_job_run_error · artifacts</text>
+  <text x="1164" y="319" class="font-mono" font-size="11" font-weight="700" fill="#C2410C">retry_job_run · trigger_job_run · cancel_job_run</text>
+  <text x="1164" y="338" class="font-sans" font-size="11" fill="#64748B">Monitors &amp; triggers production/staging dbt builds</text>
+
+  <!-- Box 3B: Discovery & Semantic Layer (PROD Environment) -->
+  <rect x="1150" y="362" width="404" height="186" rx="11" fill="#EFF6FF" stroke="#93C5FD" stroke-width="1.3" />
+  <rect x="1164" y="374" width="248" height="20" rx="5" fill="#DBEAFE" />
+  <text x="1288" y="388" text-anchor="middle" class="font-sans" font-size="10.5" font-weight="800" fill="#1E40AF">PROD / DEPLOYMENT ENVIRONMENT</text>
+  <text x="1164" y="412" class="font-sans" font-size="13" font-weight="800" fill="#1E3A8A">Discovery API &amp; Semantic Layer (MetricFlow)</text>
+  <text x="1164" y="433" class="font-sans" font-size="11.5" fill="#334155">Queries built deployment artifacts (manifest / semantic_manifest):</text>
+  <text x="1164" y="454" class="font-mono" font-size="10.8" fill="#1E3A8A">get_mart_models · get_all_models · get_all_sources</text>
+  <text x="1164" y="473" class="font-mono" font-size="10.8" fill="#1E3A8A">get_lineage (Model, Seed, Source, SemanticModel, Test)</text>
+  <text x="1164" y="492" class="font-mono" font-size="10.8" fill="#1E3A8A">get_node_details · get_model_health/perf · exposures</text>
+  <text x="1164" y="511" class="font-mono" font-size="10.8" font-weight="700" fill="#9D174D">list_metrics · query_metrics · get_metrics_compiled_sql</text>
+  <text x="1164" y="534" class="font-sans" font-size="11" fill="#475569">Populated by completed dbt build runs in deployment env</text>
+
+  <!-- Box 3C: SQL & Copilot Gateway (DEV Environment) -->
+  <rect x="1150" y="560" width="404" height="132" rx="11" fill="#F0FDFA" stroke="#5EEAD4" stroke-width="1.3" />
+  <rect x="1164" y="572" width="268" height="20" rx="5" fill="#CCFBF1" />
+  <text x="1298" y="586" text-anchor="middle" class="font-sans" font-size="10.5" font-weight="800" fill="#115E59">DEV ENVIRONMENT · USER CREDENTIALS</text>
+  <text x="1164" y="610" class="font-sans" font-size="13" font-weight="800" fill="#134E4A">dbt Platform SQL Gateway &amp; dbt Copilot</text>
+  <text x="1164" y="631" class="font-mono" font-size="11" font-weight="700" fill="#0F766E">text_to_sql (NL -&gt; Jinja) · execute_sql (Warehouse)</text>
+  <text x="1164" y="652" class="font-sans" font-size="11.5" fill="#334155">Compiles {{ ref() }} / {{ source() }} &amp; executes using user's</text>
+  <text x="1164" y="670" class="font-sans" font-size="11.5" fill="#334155">personal Development Credentials configured in dbt Platform</text>
+
+  <!-- Box 3D: Cloud Data Warehouse (BigQuery Highlighted for Google) -->
+  <rect x="1150" y="714" width="404" height="104" rx="11" fill="url(#googleBlue)" stroke="#1A73E8" stroke-width="1.6" />
+  <rect x="1164" y="726" width="166" height="20" rx="5" fill="#1A73E8" />
+  <text x="1247" y="740" text-anchor="middle" class="font-sans" font-size="10.5" font-weight="800" fill="#FFFFFF">CLOUD DATA WAREHOUSE</text>
+  <text x="1164" y="765" class="font-sans" font-size="14" font-weight="800" fill="#0F172A">Google BigQuery ( &amp; Cloud Warehouses )</text>
+  <text x="1164" y="786" class="font-sans" font-size="11.8" fill="#334155">Executes dbt build pipelines, MetricFlow semantic SQL,</text>
+  <text x="1164" y="804" class="font-sans" font-size="11.8" fill="#334155">and governed ad-hoc queries with enterprise IAM &amp; lineage</text>
+
+  <!-- ===================================================================== -->
+  <!-- INTER-COLUMN ARROWS & PROTOCOL CALLOUTS                               -->
+  <!-- ===================================================================== -->
+  <!-- Chat -> Agent -->
+  <path d="M 572 206 L 664 206" fill="none" stroke="#1A73E8" stroke-width="2.4" marker-end="url(#arrowBlue)" />
+  <rect x="591" y="182" width="56" height="18" rx="4" fill="#EFF6FF" stroke="#BFDBFE" />
+  <text x="619" y="194" text-anchor="middle" class="font-mono" font-size="9.5" font-weight="700" fill="#1D4ED8">Prompt</text>
+
+  <!-- Agent -> Canvas (emit_a2ui) -->
+  <path d="M 664 256 L 618 256 L 618 320 L 574 320" fill="none" stroke="#0F9D58" stroke-width="2.5" marker-end="url(#arrowGreen)" />
+  <rect x="588" y="276" width="62" height="19" rx="4" fill="#ECFDF5" stroke="#A7F3D0" />
+  <text x="619" y="289" text-anchor="middle" class="font-mono" font-size="9.5" font-weight="800" fill="#047857">emit_a2ui</text>
+
+  <!-- Canvas -> Agent (a2ui_action) -->
+  <path d="M 572 568 L 664 568" fill="none" stroke="#FF6849" stroke-width="2.5" marker-end="url(#arrowOrange)" />
+  <rect x="584" y="543" width="70" height="19" rx="4" fill="#FFF7ED" stroke="#FDBA74" />
+  <text x="619" y="556" text-anchor="middle" class="font-mono" font-size="9.5" font-weight="800" fill="#C2410C">a2ui_action</text>
+
+  <!-- Internal Col 2 Connectors -->
+  <path d="M 860 284 L 860 297" fill="none" stroke="#475569" stroke-width="1.8" marker-end="url(#arrowSlate)" />
+  <path d="M 860 476 L 860 489" fill="none" stroke="#475569" stroke-width="1.8" marker-end="url(#arrowSlate)" />
+  <path d="M 860 656 L 860 669" fill="none" stroke="#475569" stroke-width="1.8" marker-end="url(#arrowSlate)" />
+
+  <!-- Col 2 MCP Bridge -> Col 3 dbt Platform Remote MCP -->
+  <path d="M 1054 735 L 1100 735 L 1100 280 L 1146 280" fill="none" stroke="#FF6849" stroke-width="2.4" marker-end="url(#arrowOrange)" />
+  <path d="M 1100 455 L 1146 455" fill="none" stroke="#1A73E8" stroke-width="2.4" marker-end="url(#arrowBlue)" />
+  <path d="M 1100 626 L 1146 626" fill="none" stroke="#0F9D58" stroke-width="2.4" marker-end="url(#arrowGreen)" />
+
+  <rect x="1073" y="492" width="54" height="34" rx="5" fill="#0F172A" />
+  <text x="1100" y="506" text-anchor="middle" class="font-mono" font-size="9" font-weight="700" fill="#FDBA74">JSON</text>
+  <text x="1100" y="519" text-anchor="middle" class="font-mono" font-size="9" font-weight="700" fill="#93C5FD">RPC</text>
+
+  <!-- dbt Platform -> BigQuery Warehouse -->
+  <path d="M 1352 692 L 1352 711" fill="none" stroke="#1A73E8" stroke-width="2.4" marker-end="url(#arrowBlue)" />
+  <path d="M 1536 534 L 1560 534 L 1560 766 L 1556 766" fill="none" stroke="#1A73E8" stroke-width="1.8" stroke-dasharray="4 3" marker-end="url(#arrowBlue)" />
+
+  <!-- Bottom Executive Value Strip -->
+  <rect x="28" y="848" width="1544" height="38" rx="10" fill="#0F172A" />
+  <text x="48" y="872" class="font-sans" font-size="12.5" font-weight="800" fill="#FDBA74">KEY VALUE FOR GOOGLE &amp; dbt USERS:</text>
+  <text x="292" y="872" class="font-sans" font-size="12" fill="#F8FAFC">1. Parallel Prefetch eliminates LLM wait on 90% of clicks (0ms UI)</text>
+  <text x="708" y="872" class="font-sans" font-size="12" fill="#CBD5E1">|</text>
+  <text x="726" y="872" class="font-sans" font-size="12" fill="#F8FAFC">2. Zero-trust CSP IFrameSrcdoc + 2-Step Human Approval</text>
+  <text x="1098" y="872" class="font-sans" font-size="12" fill="#CBD5E1">|</text>
+  <text x="1116" y="872" class="font-sans" font-size="12" fill="#F8FAFC">3. Governed PROD Lineage/Metrics + DEV BigQuery SQL</text>
+</svg>
